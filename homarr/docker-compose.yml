@@ -35,6 +35,12 @@ services:
       - streaming_default
       - server-room_default
       - uptime-kuma_default
+      # Added 2026-07-28 with the AdGuard and Portainer tiles. Portainer's
+      # status check had been pointing at https://172.17.0.2:9443 -- a raw
+      # container IP from the default bridge, which changed the moment the
+      # container was recreated. Container names only.
+      - adguard_default
+      - portainer_default
 
 volumes:
   homarr_data:
@@ -54,4 +60,8 @@ networks:
   server-room_default:
     external: true
   uptime-kuma_default:
+    external: true
+  adguard_default:
+    external: true
+  portainer_default:
     external: true
