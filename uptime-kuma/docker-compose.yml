@@ -28,6 +28,7 @@ services:
       # the service.
       - adguard_default
       - portainer_default
+      - navidrome_default
 
 volumes:
   kuma_data:
@@ -46,6 +47,8 @@ networks:
   adguard_default:
     external: true
   portainer_default:
+    external: true
+  navidrome_default:
     external: true
   streaming_default:
     external: true

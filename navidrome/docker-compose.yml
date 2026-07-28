@@ -1,0 +1,45 @@
+services:
+  # Self-hosted music streaming, added 2026-07-28. Navidrome speaks the
+  # Subsonic API, which is what makes it usable from phone, PC and Alexa
+  # without a separate app per platform.
+  #
+  # Port 4533 is Navidrome's default and was free on this host -- see the port
+  # list in README.md before changing it.
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: always
+    ports:
+      - "4533:4533"
+    environment:
+      # Kolkata to match every other container on this host, so timestamps in
+      # play history line up with the logs.
+      - TZ=Asia/Kolkata
+      - ND_LOGLEVEL=info
+      # Scan on a schedule rather than watching the filesystem. The music lives
+      # on D:, a bind mount from Windows, and filesystem notifications do not
+      # cross that boundary reliably -- polling is the thing that actually works.
+      - ND_SCANSCHEDULE=1h
+      # Subsonic clients (and the Alexa skills that wrap them) authenticate
+      # with the legacy token scheme, which Navidrome disables by default.
+      - ND_ENABLEINSIGHTS=false
+      # Transcode on the fly so phones on mobile data are not pulling FLAC.
+      - ND_ENABLETRANSCODINGCONFIG=true
+    volumes:
+      - navidrome_data:/data
+      # Read-only on purpose: Navidrome never needs to modify the library, and
+      # a music scanner with write access to the media disk is an unnecessary
+      # risk next to Sonarr/Radarr's hardlinked tree.
+      - D:/Media/music:/music:ro
+    # Same DNS treatment as the *arr services. The ISP resolver hijacks
+    # lookups, and Navidrome fetches artist art and metadata from external
+    # providers -- without this it silently gets no artwork.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+
+volumes:
+  navidrome_data:
+    name: navidrome_data

@@ -23,6 +23,7 @@ no application data, no databases, and no credentials.
 | `server-room` | glances | Host metrics. |
 | `immich` | immich-server, machine-learning, postgres, valkey | Photo library. |
 | `portainer` | portainer | Container management UI. |
+| `navidrome` | navidrome | Self-hosted music streaming (Subsonic API). |
 
 Immich and Portainer were brought into this tree on 2026-07-28. Immich's compose
 file had been living in a Docker Desktop AI-agent scratch directory that Docker
@@ -42,6 +43,7 @@ fails to bind.
 3001   uptime-kuma        6881  qbittorrent      8989  sonarr
 3080   adguard (web UI)   7575  homarr           9443  portainer
 3456   vikunja            7878  radarr           9696  prowlarr
+4533   navidrome
 5055   jellyseerr         8080  qbittorrent      11011 cleanuparr
 6246   maintainerr        8095  filebrowser      61208 glances
 2283   immich             8096  jellyfin         8191  flaresolverr
