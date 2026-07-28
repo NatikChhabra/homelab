@@ -591,7 +591,7 @@ sec "15. Non-media stacks"
 OTHER_CONTAINERS="adguardhome immich-immich-server-1 immich-database-1 immich-redis-1 \
 immich-immich-machine-learning-1 vaultwardem-vaultwarden-1 vikunja-vikunja-1 \
 filebrowser-filebrowser-1 homarr-homarr-1 uptime-kuma-uptime-kuma-1 portainer \
-server-room-glances-1"
+server-room-glances-1 navidrome"
 for c in $OTHER_CONTAINERS; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
   if [ "$st" != "running" ]; then
@@ -615,6 +615,7 @@ check_port 8222  vaultwarden "200 302"
 check_port 3456  vikunja     "200 302"
 check_port 8095  filebrowser "200 302"
 check_port 61208 glances     "200 302"
+check_port 4533  navidrome   "200 302"
 
 # Portainer is HTTPS-only with a self-signed cert, so check_port's plain HTTP
 # probe cannot be reused here.

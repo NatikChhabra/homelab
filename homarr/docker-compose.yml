@@ -41,6 +41,7 @@ services:
       # container was recreated. Container names only.
       - adguard_default
       - portainer_default
+      - navidrome_default
 
 volumes:
   homarr_data:
@@ -64,4 +65,6 @@ networks:
   adguard_default:
     external: true
   portainer_default:
+    external: true
+  navidrome_default:
     external: true
