@@ -22,6 +22,10 @@
 !*.ps1
 !glances-kiosk.bat
 
+# The pre-commit secret guard has no extension, so the allowlist above would
+# drop it. Enable it after cloning with: git config core.hooksPath .githooks
+!.githooks/pre-commit
+
 # --- templates (never the real thing) ----------------------------------------
 !*.example
 

@@ -1,0 +1,83 @@
+#!/bin/bash
+# ============================================================================
+# pre-commit -- refuse to commit anything that looks like a credential.
+#
+# WHY THIS EXISTS: this repository is public. .gitignore is an allowlist and
+# fails closed, which is the primary defence, but it only protects files nobody
+# force-adds. On 2026-07-28, the day this tree was first committed, a manual
+# scan of the staged diff caught two real leaks that the allowlist had let
+# through legitimately-tracked files:
+#
+#   * Homarr's SECRET_ENCRYPTION_KEY, hardcoded in its docker-compose.yml. It
+#     decrypts every integration credential Homarr stores.
+#   * Three Uptime Kuma push tokens, hardcoded in run-job.ps1. Anyone holding
+#     one can forge an "up" heartbeat and hide a job that has stopped running.
+#
+# Both were found by eye. That is not a control. This is.
+#
+# Enable (required once per clone):
+#   git config core.hooksPath .githooks
+#
+# Bypass deliberately, knowing what you are doing:  git commit --no-verify
+# ============================================================================
+
+fail=0
+note() { printf '  %s\n' "$*" >&2; }
+
+# Secret FILES must never be tracked, whatever .gitignore currently says.
+staged_secret_files=$(git diff --cached --name-only --diff-filter=ACM \
+                      | grep -E '(^|/)(secrets\.env|\.env)$' || true)
+if [ -n "$staged_secret_files" ]; then
+  printf '\nBLOCKED: staging a secret file.\n' >&2
+  printf '%s\n' "$staged_secret_files" | while read -r f; do note "$f"; done
+  note ""
+  note "Unstage it:  git rm --cached <file>"
+  note "If it was ever pushed, rotate every key it contains -- removing the"
+  note "file in a later commit does NOT remove it from history."
+  fail=1
+fi
+
+# Secret VALUES inside otherwise-legitimate files. Assignments only, so prose
+# and variable references like ${SECRET_ENCRYPTION_KEY} do not trip it.
+added=$(git diff --cached --diff-filter=ACM -U0 | grep '^+' | grep -v '^+++' || true)
+
+# Case-INSENSITIVE. Incident 2026-07-28: the first version of this hook used a
+# case-sensitive pattern, so a test line reading `$FakeToken = "..."` sailed
+# straight through and the "blocked" commit was created. A guard that only
+# catches SHOUTING_CASE catches almost nothing -- PushToken, ApiKey and
+# client_secret are all normal spellings.
+SECRET_RE="(token|api_?key|secret|password|passwd|credential)[a-z0-9_]*\s*[:=]\s*['\"]?[A-Za-z0-9+/=_-]{16,}"
+if printf '%s' "$added" | grep -qiE "$SECRET_RE"; then
+  # Allow the documented-safe forms. The test must look at the VALUE side only.
+  #
+  # Incident 2026-07-28: the first working version excluded any line matching
+  # \$[A-Za-z_] -- intended to mean "this is a variable reference". But
+  # PowerShell assigns as `$Name = "value"`, so the NAME side satisfied it and
+  # every hardcoded secret in a .ps1 file was waved through. That is the exact
+  # file type the real leak (three Uptime Kuma push tokens in run-job.ps1) lived
+  # in, so the guard was blind precisely where it was needed. Anchor the
+  # exclusion after the separator: safe means the VALUE is a variable.
+  offenders=$(printf '%s' "$added" \
+    | grep -iE "$SECRET_RE" \
+    | grep -vE "[:=][[:space:]]*['\"]?\\\$|example|EXAMPLE|placeholder|REDACTED|xxxx" || true)
+  if [ -n "$offenders" ]; then
+    printf '\nBLOCKED: a hardcoded credential appears in the staged changes.\n' >&2
+    printf '%s\n' "$offenders" | head -10 | while read -r l; do note "$l"; done
+    note ""
+    note "Move the value into secrets.env (or homarr/.env) and reference it."
+    fail=1
+  fi
+fi
+
+# Private keys, in any tracked file.
+if printf '%s' "$added" | grep -qE 'BEGIN (RSA|OPENSSH|PGP|EC|DSA)? ?PRIVATE KEY'; then
+  printf '\nBLOCKED: a private key appears in the staged changes.\n' >&2
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  printf '\nCommit aborted. Nothing has been committed.\n\n' >&2
+  exit 1
+fi
+
+exit 0
