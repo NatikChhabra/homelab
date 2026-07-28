@@ -1,0 +1,25 @@
+services:
+  # Restored 2026-07-28. The container had been removed at some point but the
+  # full config survived in C:/ServerData/AdGuard/conf, including the filter
+  # lists and the existing login, so this brings it back rather than starting
+  # over.
+  #
+  # Reached over Tailscale: the Jio router ignores custom DNS, so instead of
+  # fighting it, the tailnet points at this host and every signed-in device gets
+  # filtering at home AND on mobile data. Nothing on the router changes, so
+  # nothing breaks for guests or for the house if this machine is off.
+  #
+  # Ports: 53 udp+tcp for DNS, 3080 for the web UI. 3080 avoids every port
+  # already in use on this host (see CLAUDE.md); the container still serves its
+  # UI on 80 internally, which is what the saved config expects.
+  adguardhome:
+    image: adguard/adguardhome:latest
+    container_name: adguardhome
+    volumes:
+      - C:/ServerData/AdGuard/work:/opt/adguardhome/work
+      - C:/ServerData/AdGuard/conf:/opt/adguardhome/conf
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "3080:80/tcp"
+    restart: always

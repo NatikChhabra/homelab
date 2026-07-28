@@ -1,0 +1,57 @@
+services:
+  homarr:
+    image: ghcr.io/homarr-labs/homarr:latest
+    container_name: homarr-homarr-1
+    restart: always
+    ports:
+      - "7575:7575"
+    volumes:
+      - homarr_data:/appdata
+    environment:
+      # Was hardcoded here until 2026-07-28. It decrypts every integration
+      # credential Homarr stores, so it moved to Stacks/homarr/.env (gitignored)
+      # when this tree went into version control. Compose loads .env from this
+      # directory automatically; the value itself is unchanged, so the existing
+      # db.sqlite still decrypts. Losing it means re-entering every tile's
+      # credentials, so it is in the nightly backup via the homarr_data volume.
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:?set in Stacks/homarr/.env}
+      - AUTH_PROVIDERS=credentials
+      - DB_DIALECT=sqlite
+      - DB_DRIVER=better-sqlite3
+      - DB_URL=/appdata/db/db.sqlite
+    # Homarr runs tile status-checks and widget integrations SERVER-SIDE, from
+    # inside this container. Docker Desktop on Windows cannot reach the host's
+    # published ports via the LAN or Tailscale IP, so a status check aimed at
+    # 100.80.120.33 always fails (red dot) even though the same URL works fine
+    # in a browser. Joining every stack network lets each tile use
+    # ping_url = http://<container>:<port> for its status dot, while href stays
+    # on the Tailscale IP for click-through. Same fix as uptime-kuma.
+    networks:
+      - default
+      - filebrowser_default
+      - immich_default
+      - vikunja_default
+      - vaultwarden_default
+      - streaming_default
+      - server-room_default
+      - uptime-kuma_default
+
+volumes:
+  homarr_data:
+    name: homarr_homarr_data
+
+networks:
+  filebrowser_default:
+    external: true
+  immich_default:
+    external: true
+  vikunja_default:
+    external: true
+  vaultwarden_default:
+    external: true
+  streaming_default:
+    external: true
+  server-room_default:
+    external: true
+  uptime-kuma_default:
+    external: true

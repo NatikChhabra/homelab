@@ -1,0 +1,43 @@
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    restart: always
+    ports:
+      - "3001:3001"
+    volumes:
+      - kuma_data:/app/data
+    # Uptime Kuma must join every other stack's network so monitors can use
+    # container names (http://jellyfin:8096) instead of the host LAN IP.
+    # Docker Desktop on Windows does NOT let a container reach the host's
+    # published ports via the LAN or Tailscale IP — both give ECONNREFUSED —
+    # so container-name monitoring is the only thing that works here.
+    # Without these declarations a `docker compose up -d` recreate would drop
+    # the runtime `docker network connect` links and silently break monitors.
+    networks:
+      - default
+      - filebrowser_default
+      - homarr_default
+      - immich_default
+      - vikunja_default
+      - vaultwarden_default
+      - streaming_default
+      - server-room_default
+
+volumes:
+  kuma_data:
+
+networks:
+  filebrowser_default:
+    external: true
+  homarr_default:
+    external: true
+  immich_default:
+    external: true
+  vikunja_default:
+    external: true
+  vaultwarden_default:
+    external: true
+  streaming_default:
+    external: true
+  server-room_default:
+    external: true

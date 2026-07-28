@@ -1,0 +1,237 @@
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+      - WEBUI_PORT=8080
+    volumes:
+      - qbittorrent_config:/config
+      - D:/Media:/data
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: always
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+    volumes:
+      - prowlarr_config:/config
+    ports:
+      - "9696:9696"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=Asia/Kolkata
+    ports:
+      - "8191:8191"
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+    volumes:
+      - sonarr_config:/config
+      - D:/Media:/data
+    ports:
+      - "8989:8989"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+    volumes:
+      - radarr_config:/config
+      - D:/Media:/data
+    ports:
+      - "7878:7878"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+    volumes:
+      - bazarr_config:/config
+      - D:/Media:/data
+    ports:
+      - "6767:6767"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  # NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES removed 2026-07-27: host
+  # GPU is AMD Radeon, no DeviceRequests, no /dev/dri — the vars did nothing.
+  # Jellyfin's encoding.xml already has HardwareAccelerationType=none.
+  # dns + disable_ipv6 added 2026-07-27 to match the *arr services: without
+  # them jellyfin used ISP DNS, which resolves api.themoviedb.org to a hijacked
+  # 49.44.79.236 (connect times out) and returns an unreachable AAAA record.
+  # Symptom was "Network is unreachable (api.themoviedb.org:443)" and no
+  # metadata/artwork. Other HTTPS was unaffected, so it looked like TMDb only.
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+    volumes:
+      - jellyfin_config:/config
+      - D:/Media:/data
+    ports:
+      - "8096:8096"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  # Jellyseerr was renamed upstream to Seerr (2026). fallenbagel/jellyseerr
+  # is frozen at 2.7.3 (published 2025-08-14) and no longer receives fixes.
+  # Service/container name kept as "jellyseerr" on purpose: Homarr ping_url
+  # and Uptime Kuma monitors resolve http://jellyseerr:5055 by container name.
+  # Seerr runs non-root (UID 1000) and requires init: true.
+  # Rollback: Backups/jellyseerr_config_20260726-pre-seerr.tar.gz
+  jellyseerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: jellyseerr
+    init: true
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - jellyseerr_config:/app/config
+    ports:
+      - "5055:5055"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    restart: always
+
+  # Maintainerr moved orgs upstream: ghcr.io/jorenn92/maintainerr is frozen at
+  # 2.19.0 (its :latest still points there). Current releases live at
+  # ghcr.io/maintainerr/maintainerr. 3.x adds Jellyfin watch-history support,
+  # which 2.19.0 lacked entirely (its Application enum had no Jellyfin entry).
+  # 3.0 DB migrations are NOT backward compatible - rollback means restoring
+  # Backups/maintainerr_config_20260726-pre-3x.tar.gz, not downgrading the image.
+  # Runs as node (UID 1000); volume path /opt/data unchanged.
+  maintainerr:
+    image: ghcr.io/maintainerr/maintainerr:latest
+    container_name: maintainerr
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - maintainerr_config:/opt/data
+    ports:
+      - "6246:6246"
+    restart: always
+
+  cleanuparr:
+    image: ghcr.io/cleanuparr/cleanuparr:latest
+    container_name: cleanuparr
+    environment:
+      - PORT=11011
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+    volumes:
+      - cleanuparr_config:/config
+    ports:
+      - "11011:11011"
+    restart: always
+
+  # EXPERIMENTAL — Tiramisu torrent-streaming FUSE filesystem.
+  # DISABLED 2026-07-26: mrrobotogit/tiramisu:latest (built 2026-07-19) is
+  # broken upstream — docker-entrypoint.sh line 72 execs
+  # /usr/local/bin/gostream, which is not shipped in the image. Container
+  # exits 127 immediately. Host FUSE support was verified working
+  # (/dev/fuse present, CAP_SYS_ADMIN granted), so this is purely an
+  # upstream packaging bug. Re-enable once upstream ships gostream.
+  # NOTE: do NOT bind-mount the fuse_mount_path (virtual) dir — the
+  # container creates the FUSE mount there itself and logs
+  # "Non-FUSE mountpoint ... (Docker bind), leaving intact" if pre-bound.
+  #
+  # tiramisu:
+  #   image: mrrobotogit/tiramisu:latest
+  #   container_name: tiramisu
+  #   devices:
+  #     - /dev/fuse
+  #   cap_add:
+  #     - SYS_ADMIN
+  #     - NET_ADMIN
+  #   security_opt:
+  #     - apparmor:unconfined
+  #   environment:
+  #     - TZ=Asia/Kolkata
+  #   volumes:
+  #     - C:/ServerData/Tiramisu/config/config.json:/config.json:ro
+  #     - C:/ServerData/Tiramisu/real:/mnt/tiramisu-mkv-real
+  #   ports:
+  #     - "8090:8090"
+  #     - "9080:9080"
+  #   restart: "no"
+
+volumes:
+  prowlarr_config:
+    external: true
+  bazarr_config:
+    external: true
+  radarr_config:
+    external: true
+  sonarr_config:
+    external: true
+  jellyseerr_config:
+    external: true
+  cleanuparr_config:
+    external: true
+  maintainerr_config:
+    external: true
+  qbittorrent_config:
+    external: true
+  jellyfin_config:
+    external: true

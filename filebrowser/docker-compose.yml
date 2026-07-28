@@ -1,0 +1,14 @@
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:s6
+    restart: always
+    ports:
+      - "8095:80"
+    volumes:
+      - C:/ServerData/Sync:/srv
+      - filebrowser_data:/database
+      - filebrowser_config:/config
+volumes:
+  filebrowser_data:
+  filebrowser_config:
+
