@@ -1,0 +1,9 @@
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwardem-vaultwarden-1
+    restart: always
+    ports:
+      - "8222:80"
+    volumes:
+      - C:/ServerData/Vaultwarden:/data

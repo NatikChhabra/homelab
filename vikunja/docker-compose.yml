@@ -1,0 +1,11 @@
+services:
+  vikunja:
+    image: vikunja/vikunja:latest
+    restart: always
+    ports:
+      - "3456:3456"
+    environment:
+      VIKUNJA_SERVICE_PUBLICURL: "http://100.80.120.33:3456"
+    volumes:
+      - C:/ServerData/Vikunja/files:/app/vikunja/files
+      - C:/ServerData/Vikunja/db:/db
