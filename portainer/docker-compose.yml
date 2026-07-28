@@ -1,0 +1,27 @@
+services:
+  # Portainer had no compose file at all -- it was created with a bare
+  # `docker run` and existed only as a running container. Nothing recorded its
+  # ports, volume or socket mount, so losing the container meant reconstructing
+  # it from memory. Captured here 2026-07-28 from `docker inspect`.
+  #
+  # The container_name and the external volume below are what make this file
+  # adopt the EXISTING Portainer rather than standing up a second, empty one.
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: always
+    ports:
+      - "9443:9443"
+    volumes:
+      - portainer_data:/data
+      # Docker Desktop exposes the engine socket at this host path, not at
+      # /var/run/docker.sock. Using the usual path here silently gives
+      # Portainer no engine to talk to.
+      - /run/host-services/docker.proxy.sock:/var/run/docker.sock
+
+# External so Compose adopts the existing volume instead of creating an empty
+# one, which would drop every Portainer setting, endpoint and user account.
+volumes:
+  portainer_data:
+    external: true
+    name: portainer_data
