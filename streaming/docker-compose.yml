@@ -142,6 +142,20 @@ services:
     init: true
     environment:
       - TZ=Asia/Kolkata
+      # Belt-and-braces, added 2026-07-28. Disabling IPv6 via the sysctl below
+      # stops IPv6 TRAFFIC but does not stop the resolver returning AAAA
+      # records, so Node can still try an unroutable IPv6 address first. This
+      # makes it prefer A records.
+      #
+      # Honest note on provenance: this was added while chasing intermittent
+      # "Connection reset by peer" errors reaching api.themoviedb.org, but it
+      # was NOT shown to fix them -- those resets were reproduced with busybox
+      # wget, which NODE_OPTIONS does not affect, and they continued afterwards
+      # at the same rate. The app itself logs no TMDB errors at all, so the
+      # resets look like CDN-side TLS behaviour against an unauthenticated
+      # request, not a jellyseerr fault. Kept because preferring A records on an
+      # IPv6-disabled stack is correct regardless. Do not cite it as the fix.
+      - NODE_OPTIONS=--dns-result-order=ipv4first
     volumes:
       - jellyseerr_config:/app/config
     ports:
