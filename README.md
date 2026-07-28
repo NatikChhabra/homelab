@@ -21,10 +21,16 @@ no application data, no databases, and no credentials.
 | `vikunja` | vikunja | Task manager. |
 | `filebrowser` | filebrowser | Web access to a personal file-sync directory. |
 | `server-room` | glances | Host metrics. |
+| `immich` | immich-server, machine-learning, postgres, valkey | Photo library. |
+| `portainer` | portainer | Container management UI. |
 
-Immich (photos), Traccar and Portainer run on the same host but are provisioned
-outside this tree, so no compose file for them exists here. Do not assume one
-does.
+Immich and Portainer were brought into this tree on 2026-07-28. Immich's compose
+file had been living in a Docker Desktop AI-agent scratch directory that Docker
+is free to delete, and Portainer had no compose file at all — it existed only as
+a running container created by hand. Every running container is now defined by a
+file here, and the audit fails if one is not.
+
+Traccar still runs outside this tree.
 
 ## Ports
 
@@ -143,6 +149,42 @@ most:
 - **A backup that runs perfectly can still protect nothing.** If the source is
   quietly emptying out, every individual backup "succeeds" while faithfully
   archiving less and less. Consecutive archives are compared for shrinkage.
+
+## Networking, and one trap worth knowing
+
+`.wslconfig` must keep `networkingMode=nat` and `dnsTunneling=false`.
+
+Under `networkingMode=mirrored`, Docker Desktop's port relay listens *inside*
+the WSL VM and those listeners never appear on Windows. The symptoms are
+confusing and look like several unrelated faults: published services answer on
+`127.0.0.1` but not on the LAN or the Tailscale address, and port 53 cannot be
+published at all because WSL's DNS tunnelling already holds it — Docker logs
+`bind: address already in use`, then starts the container anyway with no host
+mapping.
+
+The lesson generalises: **`docker port` reports what was requested, not what
+was achieved.** It will happily print `53/udp -> 0.0.0.0:53` when nothing is
+listening. Verify with `Get-NetUDPEndpoint -LocalPort 53`, or by actually
+resolving a name.
+
+DNS filtering is reachable only from the tailnet: the AdGuard firewall rules
+are scoped to `100.64.0.0/10`. No Tailscale DNS override is used, deliberately
+— a tailnet-wide override means this machine being off takes DNS down with it.
+
+## Pulling images
+
+`docker pull` does not work on this host. Every pull fails with
+
+```
+error getting credentials - err: exit status 1, out: `A specified logon
+session does not exist. It may already have been terminated.`
+```
+
+including anonymous pulls of public images. Restarting Docker Desktop does not
+fix it, removing `credsStore` does not fix it, and Windows Credential Manager
+holds no Docker entry at all. Use `bash docker-pull.sh <image>`, which asks the
+daemon to pull over its own API. The daemon is fine; only the CLI's credential
+path is broken.
 
 ## Working on this
 
