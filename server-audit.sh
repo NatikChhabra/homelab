@@ -493,6 +493,25 @@ else
     # Comparing consecutive archives catches shrinkage while older archives are
     # still inside the 14-day retention window and the files can still be
     # restored.
+    # Offsite copy. Incident 2026-07-28: every backup lived on a second disk in
+    # the SAME machine, which protects against a disk dying and nothing else --
+    # fire, theft, ransomware or a dead PSU takes both copies together. An
+    # offsite job that quietly stops running looks identical to one that works,
+    # so the success stamp is checked rather than assumed.
+    OFFSITE_STAMP="/c/ServerData/Stacks/.offsite-last-success"
+    if [ -f "$OFFSITE_STAMP" ]; then
+      off_age=$(( ( $(date +%s) - $(stat -c %Y "$OFFSITE_STAMP" 2>/dev/null || echo 0) ) / 3600 ))
+      if [ "$off_age" -gt 72 ]; then
+        fail "offsite backup last succeeded ${off_age}h ago - the only copy that survives losing this machine is stale"
+      elif [ "$off_age" -gt 30 ]; then
+        warn "offsite backup is ${off_age}h old (expected under 24h)"
+      else
+        ok "offsite backup current (${off_age}h old)"
+      fi
+    else
+      warn "NO offsite backup configured - every copy is on this one machine; see backup-offsite.sh"
+    fi
+
     im_new=$(ls -t "$BK_DIR"/bind-Immich_*.tar.gz 2>/dev/null | head -1)
     im_old=$(ls -t "$BK_DIR"/bind-Immich_*.tar.gz 2>/dev/null | sed -n '2p')
     if [ -n "$im_new" ] && [ -n "$im_old" ]; then
