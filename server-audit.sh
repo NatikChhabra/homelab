@@ -703,6 +703,60 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
 fi
 
 # ---------------------------------------------------------------------------
+sec "18. Docker daemon hygiene"
+# Incident 2026-07-28: every container was running with the json-file log driver
+# and NO size limit ("json-file map[]"). Container logs grow without bound, and
+# they live on the Docker Desktop VM disk, so a single chatty container filling
+# it takes down every service at once -- with no warning, because nothing here
+# was looking. The daemon-level setting covers containers that have no compose
+# file in this tree (Immich, Traccar, Portainer, AdGuard) as well as those that do.
+DAEMON_JSON="${RW_DAEMON_JSON:-/c/Users/Naiti/.docker/daemon.json}"
+if [ -r "$DAEMON_JSON" ]; then
+  if grep -q '"max-size"' "$DAEMON_JSON"; then
+    ok "docker daemon has a log size limit configured"
+  else
+    fail "docker daemon has NO log rotation - container logs grow until the VM disk fills and every service stops"
+  fi
+else
+  warn "cannot read $DAEMON_JSON to confirm log rotation"
+fi
+
+# A daemon setting only reaches a container when that container is (re)created.
+# Setting it and assuming it applied is the trap; this checks what the running
+# containers actually have.
+nolimit=0; checked=0
+for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
+  checked=$((checked+1))
+  cfg=$(docker inspect "$c" --format '{{.HostConfig.LogConfig.Config}}' 2>/dev/null)
+  case "$cfg" in
+    *max-size*) ;;
+    *) nolimit=$((nolimit+1)) ;;
+  esac
+done
+if [ "$nolimit" -gt 0 ]; then
+  warn "$nolimit/$checked running container(s) still have no log size limit - they keep the old setting until recreated (docker compose up -d)"
+else
+  ok "all $checked running containers have a log size limit"
+fi
+
+# Incident 2026-07-28: every 'docker pull' on this host failed with "A specified
+# logon session does not exist", so AdGuard could not be started and four
+# pending image updates could not be applied. Nothing detected it, because the
+# update audit reports what is OUT OF DATE, not whether updating is possible.
+if docker system info >/dev/null 2>&1; then
+  ok "docker daemon is responsive"
+else
+  fail "docker system info failed - the daemon is not answering"
+fi
+if [ -r "$HOME/.docker/config.json" ] && grep -q '"credsStore"' "$HOME/.docker/config.json" 2>/dev/null; then
+  if docker-credential-desktop.exe list >/dev/null 2>&1; then
+    ok "docker credential helper responds (image pulls can authenticate)"
+  else
+    warn "docker credential helper is failing - 'docker pull' will error and no image can be pulled or updated; restarting Docker Desktop usually clears it"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 _emit ""
 _emit "============================================================"
 # run-job.ps1 scrapes the last line matching SUMMARY for its status text and
