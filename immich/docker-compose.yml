@@ -1,0 +1,65 @@
+services:
+  # Immich was previously defined by a compose file living under
+  # C:/Users/Naiti/.docker/cagent/working_directories/<hash>/default/immich/,
+  # a Docker Desktop AI-agent scratch directory. Docker Desktop is free to
+  # delete that at any time, which would have left the photo library running
+  # with no way to manage, update or rebuild it. Moved here 2026-07-28.
+  #
+  # The project name MUST remain "immich" -- the existing volumes are
+  # immich_immich-db and immich_model-cache, and Compose derives that prefix
+  # from the directory name. Renaming this directory silently creates EMPTY
+  # volumes and Immich starts with no photos and no database.
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:release
+    container_name: immich-immich-server-1
+    restart: always
+    ports:
+      - "2283:2283"
+    volumes:
+      - C:/ServerData/Immich:/data
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: ${IMMICH_DB_USER:?set in Stacks/immich/.env}
+      DB_PASSWORD: ${IMMICH_DB_PASSWORD:?set in Stacks/immich/.env}
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+    depends_on:
+      - redis
+      - database
+
+  immich-machine-learning:
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    container_name: immich-immich-machine-learning-1
+    restart: always
+    volumes:
+      - model-cache:/cache
+
+  redis:
+    image: docker.io/valkey/valkey:9
+    container_name: immich-redis-1
+    restart: always
+
+  database:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    container_name: immich-database-1
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${IMMICH_DB_PASSWORD:?set in Stacks/immich/.env}
+      POSTGRES_USER: ${IMMICH_DB_USER:?set in Stacks/immich/.env}
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      - immich-db:/var/lib/postgresql/data
+
+# Declared external on purpose. If these are left implicit and anything about
+# the project name changes, Compose creates brand new empty volumes and Postgres
+# initialises a fresh database over the top -- the photo library would come up
+# blank and the old volume would sit there orphaned. External means Compose
+# fails loudly instead of quietly starting an empty Immich.
+volumes:
+  immich-db:
+    external: true
+    name: immich_immich-db
+  model-cache:
+    external: true
+    name: immich_model-cache

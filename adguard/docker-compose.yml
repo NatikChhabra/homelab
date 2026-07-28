@@ -19,6 +19,25 @@ services:
       - C:/ServerData/AdGuard/work:/opt/adguardhome/work
       - C:/ServerData/AdGuard/conf:/opt/adguardhome/conf
     ports:
+      # Bound to the Tailscale address, NOT 0.0.0.0. Incident 2026-07-28:
+      # publishing 53 on all interfaces silently failed --
+      #   "failed to expose port: listen udp 0.0.0.0:53: bind: address already
+      #    in use"
+      # -- because WSL2's own DNS proxy already holds 10.255.255.254:53 inside
+      # the docker-desktop distro. Docker reported the container as started and
+      # `docker ps` showed "53/udp" with no host mapping, so nothing looked
+      # wrong. That is how DNS ended up dead while everything appeared healthy.
+      # Binding the Tailscale address specifically was tried and does NOT work:
+      # `docker port` happily reports "53/udp -> 100.80.120.33:53" while no
+      # Windows listener exists at all, because the WSL side cannot bind an
+      # address that does not exist inside the VM. Verify with
+      # `Get-NetUDPEndpoint -LocalPort 53`, never with `docker port`, which
+      # reports the request rather than the result.
+      #
+      # The actual fix is dnsTunneling=false in %USERPROFILE%\.wslconfig, which
+      # frees :53 inside the VM. Exposure is then limited at the firewall
+      # instead: the "AdGuard DNS UDP/TCP" rules are scoped to 100.64.0.0/10 so
+      # only tailnet devices can reach the resolver, never the LAN or the WAN.
       - "53:53/udp"
       - "53:53/tcp"
       - "3080:80/tcp"

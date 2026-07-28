@@ -748,11 +748,37 @@ if docker system info >/dev/null 2>&1; then
 else
   fail "docker system info failed - the daemon is not answering"
 fi
+# Incident 2026-07-28: Immich's compose file lived under
+# ~/.docker/cagent/working_directories/<hash>/default/immich/ -- a Docker
+# Desktop AI-agent scratch directory that Docker is free to delete -- and
+# Portainer had no compose file at all, having been created with a bare
+# `docker run`. Losing either would have meant rebuilding the photo library
+# and the management UI from memory. Every container must be defined by a file
+# in this tree, where it is backed up and in version control.
+stray=0; stray_names=""
+for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
+  cf=$(docker inspect "$c" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
+  case "$cf" in
+    *ServerData?Stacks*) ;;
+    "") stray=$((stray+1)); stray_names="$stray_names $c(no-compose)" ;;
+    *)  stray=$((stray+1)); stray_names="$stray_names $c" ;;
+  esac
+done
+if [ "$stray" -gt 0 ]; then
+  warn "$stray container(s) are not defined by a compose file in Stacks/ -- not backed up, not in version control:$stray_names"
+else
+  ok "every running container is defined from Stacks/"
+fi
+
 if [ -r "$HOME/.docker/config.json" ] && grep -q '"credsStore"' "$HOME/.docker/config.json" 2>/dev/null; then
   if docker-credential-desktop.exe list >/dev/null 2>&1; then
     ok "docker credential helper responds (image pulls can authenticate)"
   else
-    warn "docker credential helper is failing - 'docker pull' will error and no image can be pulled or updated; restarting Docker Desktop usually clears it"
+    # Known broken on this host and not fixable from here: restarting Docker
+    # Desktop does not clear it, removing "credsStore" does not clear it
+    # (Docker Desktop rewrites the file), and Windows Credential Manager holds
+    # no docker entry at all. Use the workaround rather than fighting it.
+    warn "docker credential helper is failing - plain 'docker pull' will error; use 'bash docker-pull.sh <image>' instead, which pulls via the daemon API"
   fi
 fi
 
