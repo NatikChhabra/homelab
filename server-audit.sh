@@ -770,7 +770,12 @@ else
   ok "every running container is defined from Stacks/"
 fi
 
-if [ -r "$HOME/.docker/config.json" ] && grep -q '"credsStore"' "$HOME/.docker/config.json" 2>/dev/null; then
+# Gated on the helper EXISTING, not on credsStore being configured. An earlier
+# version only checked when "credsStore" was present in config.json, so simply
+# deleting that line made the audit go green while every pull still failed --
+# a check that reports success because it stopped looking is worse than no
+# check. Docker Desktop reinstates the line anyway.
+if command -v docker-credential-desktop.exe >/dev/null 2>&1; then
   if docker-credential-desktop.exe list >/dev/null 2>&1; then
     ok "docker credential helper responds (image pulls can authenticate)"
   else
