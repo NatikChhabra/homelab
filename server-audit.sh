@@ -227,9 +227,18 @@ for c in sonarr radarr jellyfin jellyseerr; do
   if [ -z "$code" ] || [ "$code" = "000" ]; then
     # Seerr ships wget, not curl. A 401 there surfaces as a non-zero exit with
     # "401 Unauthorized" on stderr, which still proves the host was reached.
-    if docker exec "$c" sh -c "wget -q -T 15 -O /dev/null https://api.themoviedb.org/3/ 2>&1 | grep -qiE '401|Unauthorized'" 2>/dev/null; then
-      code=401
-    fi
+    # Retried, not single-shot. Incident 2026-07-28: this reported a hard FAIL
+    # ("cannot reach api.themoviedb.org") for a host that was in fact reachable
+    # on the very next attempt -- the resolver was returning an AAAA record on a
+    # stack with IPv6 disabled, so roughly one connection in three was reset
+    # before falling back to IPv4. A single blip must not read as an outage,
+    # but a genuinely unreachable host still fails all three.
+    for _try in 1 2 3; do
+      if docker exec "$c" sh -c "wget -q -T 15 -O /dev/null https://api.themoviedb.org/3/ 2>&1 | grep -qiE '401|Unauthorized'" 2>/dev/null; then
+        code=401; break
+      fi
+      sleep 2
+    done
   fi
   case "$code" in
     401|200) ok "$c reaches api.themoviedb.org ($code)" ;;
