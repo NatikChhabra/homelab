@@ -22,6 +22,12 @@ services:
       - vaultwarden_default
       - streaming_default
       - server-room_default
+      # Added 2026-07-28 so AdGuard and Portainer can be monitored by container
+      # name. Portainer had been checked via host.docker.internal, which goes
+      # out to the host and back and so tests the port forwarding as much as
+      # the service.
+      - adguard_default
+      - portainer_default
 
 volumes:
   kuma_data:
@@ -36,6 +42,10 @@ networks:
   vikunja_default:
     external: true
   vaultwarden_default:
+    external: true
+  adguard_default:
+    external: true
+  portainer_default:
     external: true
   streaming_default:
     external: true
