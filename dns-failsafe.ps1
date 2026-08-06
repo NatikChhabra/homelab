@@ -1,7 +1,7 @@
 # ============================================================================
 # dns-failsafe.ps1 -- flip this machine's DNS between AdGuard and automatic.
 #
-# WHY THIS EXISTS: pointing a machine's adapter at AdGuard (100.80.120.33) is
+# WHY THIS EXISTS: pointing a machine's adapter at AdGuard's Tailscale IP is
 # what makes ad blocking work, but it also makes that machine depend on the
 # server being up. If the server is off, DNS stops answering and the machine
 # has no internet at all -- while looking like a broken connection rather than
@@ -34,7 +34,24 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$AdGuardV4 = '100.80.120.33'   # AdGuard over Tailscale
+# AdGuard's Tailscale IP is a real address for this network, not something to
+# hardcode in a file that went public 2026-08-07. Read the same way run-job.ps1
+# reads Uptime Kuma tokens: parsed out of secrets.env, not dot-sourced, because
+# secrets.env is shell syntax (KEY=value), not PowerShell.
+$SecretsFile = Join-Path $PSScriptRoot 'secrets.env'
+$Secrets = @{}
+if (Test-Path $SecretsFile) {
+    foreach ($line in (Get-Content $SecretsFile)) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$') {
+            $Secrets[$Matches[1]] = $Matches[2].Trim("'`"")
+        }
+    }
+}
+if (-not $Secrets.ContainsKey('ADGUARD_TAILSCALE_IP')) {
+    throw "ADGUARD_TAILSCALE_IP not set in $SecretsFile -- add it (AdGuard's Tailscale address) before running this."
+}
+
+$AdGuardV4 = $Secrets['ADGUARD_TAILSCALE_IP']   # AdGuard over Tailscale
 $AdGuardV6 = '::1'             # AdGuard on this host, when it runs here
 
 # Only adapters that are actually up and carry a default route matter. Setting

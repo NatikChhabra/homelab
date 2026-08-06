@@ -37,7 +37,14 @@ SKIP_RE='^(immich_model-cache|wger_wger_static|[0-9a-f]{64})$'
 
 # App data that is bind-mounted rather than in a Docker volume, so volume
 # discovery alone would silently miss it. Vaultwarden is first on purpose.
-BIND_DIRS="Vaultwarden AdGuard Traccar Immich Vikunja"
+# Navidrome added 2026-07-28. Its navidrome/docker-compose.yml bind-mounts
+# C:/ServerData/Navidrome/plugins and the comment there states the plugins are
+# picked up by the nightly backup. They were not: volume discovery covers
+# navidrome_data, but a bind mount outside this list is invisible to it, so the
+# claim was false the moment it was written. A third-party WASM plugin set that
+# has to be re-sourced by hand after a restore is exactly the kind of state
+# this script exists to hold.
+BIND_DIRS="Vaultwarden AdGuard Traccar Immich Vikunja Navidrome"
 
 log() { printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOG_FILE"; }
 

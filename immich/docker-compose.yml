@@ -1,6 +1,6 @@
 services:
   # Immich was previously defined by a compose file living under
-  # C:/Users/Naiti/.docker/cagent/working_directories/<hash>/default/immich/,
+  # C:/Users/<you>/.docker/cagent/working_directories/<hash>/default/immich/,
   # a Docker Desktop AI-agent scratch directory. Docker Desktop is free to
   # delete that at any time, which would have left the photo library running
   # with no way to manage, update or rebuild it. Moved here 2026-07-28.

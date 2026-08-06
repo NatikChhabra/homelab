@@ -54,12 +54,27 @@ if (Test-Path $SecretsFile) {
 $Jobs = @{
     'rolling-window' = @{
         Script    = '/c/ServerData/Stacks/rolling-window.sh'
-        PushToken = $Secrets['KUMA_PUSH_ROLLING_WINDOW']
+        PushTokenName = 'KUMA_PUSH_ROLLING_WINDOW'
         Env       = @{
             # LIVE as of 2026-07-26, explicitly approved after the cross-season
             # dry-run output was reviewed. Deletions are real from here on.
             'RW_DRY_RUN'         = 'false'
-            'RW_WINDOW_SIZE'     = '3'
+            # WINDOW REMOVED 2026-07-28 at the user's instruction: requesting a
+            # season now downloads the WHOLE season, not three episodes at a
+            # time. 0 means unlimited.
+            #
+            # This line used to say '3', and it is the one that actually
+            # mattered -- it overrode the script's own default, so changing the
+            # default alone would have left every scheduled run still capped at
+            # three episodes while appearing to be fixed.
+            'RW_WINDOW_SIZE'     = '0'
+            # Deleting unwatched files existed only to keep disk usage matched
+            # to the 3-episode window. With no window there is nothing to
+            # enforce, and leaving it on would delete episodes the moment they
+            # arrived. Explicit rather than relying on the default.
+            'RW_DELETE_UNWATCHED' = 'false'
+            # UNCHANGED, deliberately: watched episodes are still deleted after
+            # viewing. That behaviour works and was explicitly not to be touched.
             'RW_DELETE_WATCHED'  = 'true'
             'RW_LOG_FILE'        = '/c/ServerData/Stacks/rolling-window.log'
         }
@@ -67,7 +82,7 @@ $Jobs = @{
     }
     'update-audit'   = @{
         Script    = '/c/ServerData/Stacks/update-audit.sh'
-        PushToken = $Secrets['KUMA_PUSH_UPDATE_AUDIT']
+        PushTokenName = 'KUMA_PUSH_UPDATE_AUDIT'
         Env       = @{
             'UA_LOG_FILE'   = '/c/ServerData/Stacks/update-audit.log'
             'UA_STAGE_FILE' = '/c/ServerData/Stacks/update-audit-staged.sh'
@@ -76,7 +91,12 @@ $Jobs = @{
     }
     'backup-volumes' = @{
         Script    = '/c/ServerData/Stacks/backup-volumes.sh'
-        PushToken = ''
+        # Was '' until 2026-07-28, meaning the nightly backup ran with NO
+        # monitoring at all -- Send-Heartbeat returns early on an empty token,
+        # so a backup that stopped running entirely would have gone unnoticed
+        # until someone needed a restore. That is the one job where silent
+        # failure is worst.
+        PushTokenName = 'KUMA_PUSH_DAILY_BACKUP'
         Env       = @{
             # D: on purpose -- a different physical disk from the C: SSD that
             # holds the live data. Same-disk backups do not survive a disk
@@ -89,7 +109,10 @@ $Jobs = @{
     }
     'server-audit'   = @{
         Script    = '/c/ServerData/Stacks/server-audit.sh'
-        PushToken = ''
+        # Also '' until 2026-07-28. The weekly audit is what surfaces every
+        # other silent failure on this box, so it going quiet is a compounding
+        # problem rather than a cosmetic one.
+        PushTokenName = 'KUMA_PUSH_WEEKLY_AUDIT'
         Env       = @{
             # Read-only audit of the whole server. Warnings are advisory, so
             # only a real FAIL (exit 2) marks the job failed -- otherwise a
@@ -101,7 +124,7 @@ $Jobs = @{
     }
     'orphan-cleanup' = @{
         Script    = '/c/ServerData/Stacks/orphan-cleanup.sh'
-        PushToken = $Secrets['KUMA_PUSH_ORPHAN_CLEANUP']
+        PushTokenName = 'KUMA_PUSH_ORPHAN_CLEANUP'
         Env       = @{
             # Live. Every run still logs the complete would-delete list before
             # touching anything, and refuses to act at all if qBittorrent cannot
@@ -114,6 +137,33 @@ $Jobs = @{
 }
 
 $Def     = $Jobs[$Job]
+
+# Resolve the push token AFTER the job is selected, and record whether the
+# lookup succeeded.
+#
+# This used to read `PushToken = $Secrets['KUMA_PUSH_...']` inside the job
+# table. A PowerShell hashtable returns $null for a key it does not have, so a
+# renamed, misspelled or not-yet-added entry in secrets.env produced an empty
+# token -- and Send-Heartbeat treats an empty token as "this job has no monitor
+# on purpose" and reports success. The result would be a job that runs, passes,
+# and quietly never pings Kuma, which is precisely the silent-monitoring
+# failure the tokens were added on 2026-07-28 to remove. A configuration
+# mistake must not be indistinguishable from a configuration choice.
+#
+# The job still RUNS when the token is missing -- a backup not taken is worse
+# than a backup taken unmonitored -- but the mistake is surfaced three ways:
+# an event log Error, a field in the status file, and the Kuma monitor itself
+# going down at its next expected heartbeat.
+$PushToken       = ''
+$PushTokenBroken = $false
+if ($Def.ContainsKey('PushTokenName') -and -not [string]::IsNullOrWhiteSpace($Def.PushTokenName)) {
+    if ($Secrets.ContainsKey($Def.PushTokenName) -and -not [string]::IsNullOrWhiteSpace($Secrets[$Def.PushTokenName])) {
+        $PushToken = $Secrets[$Def.PushTokenName]
+    } else {
+        $PushTokenBroken = $true
+    }
+}
+
 $JobLogs = Join-Path $LogRoot $Job
 if (-not (Test-Path $JobLogs)) { New-Item -ItemType Directory -Force -Path $JobLogs | Out-Null }
 
@@ -130,6 +180,9 @@ function Write-Status {
         exitCode     = $Code
         summary      = $Summary
         durationSec  = [math]::Round($Seconds, 1)
+        # false means this job expects an Uptime Kuma monitor but its token
+        # could not be resolved from secrets.env, so no heartbeat was sent.
+        heartbeatConfigured = (-not $PushTokenBroken)
         finishedUtc  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         finishedLocal= (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         runLog       = $RunLog
@@ -139,13 +192,16 @@ function Write-Status {
 
 function Send-Heartbeat {
     param([string]$State, [string]$Message, [double]$Seconds)
-    # A job with no PushToken has no Uptime Kuma monitor on purpose. Report
-    # success so the caller does not log a "heartbeat could not be sent"
-    # warning on every single run for a monitor that was never meant to exist.
-    if ([string]::IsNullOrWhiteSpace($Def.PushToken)) { return $true }
+    # A job that declares no PushTokenName has no Uptime Kuma monitor on
+    # purpose. Report success so the caller does not log a "heartbeat could not
+    # be sent" warning on every run for a monitor that was never meant to
+    # exist. A job that DOES declare one but whose token could not be resolved
+    # is a different case entirely and is reported as a failure to send.
+    if ($PushTokenBroken) { return $false }
+    if ([string]::IsNullOrWhiteSpace($PushToken)) { return $true }
     # A failure to reach Kuma must never fail the job itself.
     try {
-        $url = "$KumaBase/api/push/$($Def.PushToken)?status=$State&msg=$([uri]::EscapeDataString($Message))&ping=$([math]::Round($Seconds * 1000))"
+        $url = "$KumaBase/api/push/$($PushToken)?status=$State&msg=$([uri]::EscapeDataString($Message))&ping=$([math]::Round($Seconds * 1000))"
         Invoke-RestMethod -Uri $url -TimeoutSec 20 | Out-Null
         return $true
     } catch {
@@ -165,6 +221,16 @@ function Write-JobEvent {
         # Event log unavailable (no admin rights) -- the status file and the
         # missed Kuma heartbeat still make the failure visible.
     }
+}
+
+# ---- monitoring configuration --------------------------------------------
+# Reported before the job runs, so the reason is in the transcript even if the
+# job itself then fails for an unrelated reason.
+if ($PushTokenBroken) {
+    $msg = "$Job declares Uptime Kuma token '$($Def.PushTokenName)' but secrets.env has no usable value for it. " +
+           "The job will still run, but NO heartbeat will be sent and the Kuma monitor will go down at its next expected beat."
+    Add-Content -Path $RunLog -Value $msg
+    Write-JobEvent -EntryType Error -Message $msg -EventId 1005
 }
 
 # ---- overlap guard ---------------------------------------------------------
@@ -200,7 +266,12 @@ try {
         "env     : " + (($Def.Env.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '  '),
         ''
     )
-    $header | Out-File -FilePath $RunLog -Encoding utf8
+    # -Append, because $RunLog may already hold the PushTokenBroken warning that
+    # the monitoring-configuration block wrote before the job started. Without
+    # it, Out-File truncated the file and erased that warning -- so the comment
+    # promising the reason would be "in the transcript" was false. $RunLog is
+    # timestamped per run, so appending never mixes two runs together.
+    $header | Out-File -FilePath $RunLog -Encoding utf8 -Append
 
     $output = & $BashExe $Def.Script *>&1
     $exitCode = $LASTEXITCODE

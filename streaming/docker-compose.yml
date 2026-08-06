@@ -1,7 +1,30 @@
+# mem_limit on every service, added 2026-07-29.
+#
+# Until now NOT ONE of the 23 running containers had a memory limit. The host
+# has 15.4 GB and the WSL2 VM is capped at 10 GB, so a single runaway container
+# -- Immich's ML worker during face detection, or a Jellyfin software transcode,
+# which is the only kind available here since there is no /dev/dri -- could
+# exhaust the VM and take down EVERY container with it. That includes
+# adguardhome, which is DNS for every device on the tailnet, so the blast radius
+# of one leaking container was the whole house losing name resolution.
+#
+# These are CAPS, not reservations. Their sum deliberately exceeds the 10 GB VM:
+# nothing is pre-allocated, and the job of the number is to stop one process
+# eating everything, not to partition the VM between services. Each limit is
+# roughly 3-4x the container's observed steady-state usage (measured
+# 2026-07-29 via docker stats), with more headroom where the workload is known
+# to be spiky rather than flat.
+#
+# If a container starts getting OOM-killed, its limit is too low for real
+# workload -- raise that one number. Check with:
+#   docker inspect -f '{{.State.OOMKilled}}' <name>
 services:
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
     container_name: qbittorrent
+    # 82 MB idle, but this is the one that grows with work: disk cache, and a
+    # recheck of a large torrent walks the whole file. 35 torrents today.
+    mem_limit: 2g
     environment:
       - PUID=1000
       - PGID=1000
@@ -19,6 +42,8 @@ services:
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr
+    # 232 MB idle. Indexer fan-out across 36 indexers is network-bound, not memory-bound.
+    mem_limit: 1g
     environment:
       - PUID=1000
       - PGID=1000
@@ -37,6 +62,8 @@ services:
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
+    # 323 MB idle and it IS a Chromium instance, so it is the spikiest of the small services.
+    mem_limit: 1g
     environment:
       - LOG_LEVEL=info
       - TZ=Asia/Kolkata
@@ -49,6 +76,8 @@ services:
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
     container_name: sonarr
+    # 225 MB idle. Import scans and the rolling-window API traffic stay flat.
+    mem_limit: 1g
     environment:
       - PUID=1000
       - PGID=1000
@@ -68,6 +97,8 @@ services:
   radarr:
     image: lscr.io/linuxserver/radarr:latest
     container_name: radarr
+    # 218 MB idle, same shape as sonarr.
+    mem_limit: 1g
     environment:
       - PUID=1000
       - PGID=1000
@@ -87,6 +118,8 @@ services:
   bazarr:
     image: lscr.io/linuxserver/bazarr:latest
     container_name: bazarr
+    # 287 MB idle -- highest of the *arr set, subtitle extraction holds files in memory.
+    mem_limit: 1g
     environment:
       - PUID=1000
       - PGID=1000
@@ -114,6 +147,10 @@ services:
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
+    # 361 MB idle. HIGHEST CAP HERE ON PURPOSE: with no /dev/dri every transcode is
+    # software, and a 4K software transcode is the single largest legitimate
+    # memory spike on this box. 3g leaves room for two concurrent streams.
+    mem_limit: 3g
     environment:
       - PUID=1000
       - PGID=1000
@@ -139,6 +176,8 @@ services:
   jellyseerr:
     image: ghcr.io/seerr-team/seerr:latest
     container_name: jellyseerr
+    # 260 MB idle. Node, so it grows to fill what it is given -- a cap is what bounds it.
+    mem_limit: 1g
     init: true
     environment:
       - TZ=Asia/Kolkata
@@ -177,6 +216,8 @@ services:
   maintainerr:
     image: ghcr.io/maintainerr/maintainerr:latest
     container_name: maintainerr
+    # 205 MB idle. Collection rule evaluation is periodic and bounded.
+    mem_limit: 1g
     environment:
       - TZ=Asia/Kolkata
     volumes:
@@ -188,6 +229,8 @@ services:
   cleanuparr:
     image: ghcr.io/cleanuparr/cleanuparr:latest
     container_name: cleanuparr
+    # 247 MB idle.
+    mem_limit: 1g
     environment:
       - PORT=11011
       - PUID=1000

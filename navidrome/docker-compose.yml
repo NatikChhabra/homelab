@@ -20,17 +20,68 @@ services:
       # on D:, a bind mount from Windows, and filesystem notifications do not
       # cross that boundary reliably -- polling is the thing that actually works.
       - ND_SCANSCHEDULE=1h
-      # Subsonic clients (and the Alexa skills that wrap them) authenticate
-      # with the legacy token scheme, which Navidrome disables by default.
+      # Anonymous usage telemetry, off. (The comment that used to sit here
+      # claimed this flag controlled Subsonic legacy auth. It does not --
+      # ND_ENABLEINSIGHTS is telemetry only, and Navidrome's token+salt
+      # Subsonic auth is on by default, which is what any Subsonic client
+      # uses. An Alexa bridge for this was built and then dropped on
+      # 2026-07-28: it needed Navidrome published to the open internet over
+      # Tailscale Funnel, and that is a bad trade for voice control.)
       - ND_ENABLEINSIGHTS=false
       # Transcode on the fly so phones on mobile data are not pulling FLAC.
       - ND_ENABLETRANSCODINGCONFIG=true
+
+      # --- appearance ------------------------------------------------------
+      # The stock "Dark" theme is the dull grey one. Built-in alternatives, as
+      # read out of the 0.63.2 binary: Auto, Catppuccin Macchiato, Electric
+      # Purple, Gruvbox Dark, Ligera, Monokai, Nord, Spotify-ish.
+      #
+      # NOTE: this only sets the default for accounts that have never picked a
+      # theme. An existing account keeps whatever is stored in its profile, so
+      # changing this alone will not repaint a logged-in user -- they also have
+      # to set it under Settings > Theme.
+      - ND_DEFAULTTHEME=Spotify-ish
+      # 300px art in a grid on a desktop monitor is visibly soft. Navidrome
+      # caches resized art, so the cost is disk in the cache dir, not CPU per
+      # page load.
+      - ND_UICOVERARTSIZE=450
+      - ND_ENABLECOVERANIMATION=true
+      - ND_UIWELCOMEMESSAGE=Home library
+
+      # --- plugins ---------------------------------------------------------
+      # 0.63 has the WASM plugin system on by default, but the plugin folder
+      # lives inside the named volume as root-mode-700, so there is no way to
+      # drop a .ndp file in from Windows without exec-ing into the container.
+      # Setting the folder explicitly and bind-mounting it below is what makes
+      # installing a plugin a file copy instead of a docker exec.
+      - ND_PLUGINS_ENABLED=true
+      - ND_PLUGINS_FOLDER=/data/plugins
+      # Left ON, but do NOT rely on it from the host. Navidrome does start the
+      # watcher ("Started plugin file watcher folder=/data/plugins" appears in
+      # the log), yet it never fires for a file written from Windows: a probe
+      # .ndp dropped into C:/ServerData/Navidrome/plugins on 2026-07-29
+      # produced no log line of any kind in the 20s after the write.
+      #
+      # Same boundary as ND_SCANSCHEDULE eleven lines above -- the plugin folder
+      # is a bind mount from Windows, Docker Desktop exposes it over 9p, and
+      # filesystem notifications do not cross that reliably. The watcher only
+      # helps for writes made inside the container.
+      #
+      # So: after copying a .ndp in, restart to pick it up.
+      #   docker restart navidrome
+      # then enable it in the UI -- discovery and consent stay separate.
+      - ND_PLUGINS_AUTORELOAD=true
     volumes:
       - navidrome_data:/data
       # Read-only on purpose: Navidrome never needs to modify the library, and
       # a music scanner with write access to the media disk is an unnecessary
       # risk next to Sonarr/Radarr's hardlinked tree.
       - D:/Media/music:/music:ro
+      # Plugins are third-party WASM running inside Navidrome with declared
+      # permissions. Keeping them on a host path rather than buried in the
+      # named volume means the nightly backup picks them up and you can see
+      # what is actually installed without entering the container.
+      - C:/ServerData/Navidrome/plugins:/data/plugins
     # Same DNS treatment as the *arr services. The ISP resolver hijacks
     # lookups, and Navidrome fetches artist art and metadata from external
     # providers -- without this it silently gets no artwork.

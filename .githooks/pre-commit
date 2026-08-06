@@ -57,9 +57,16 @@ if printf '%s' "$added" | grep -qiE "$SECRET_RE"; then
   # file type the real leak (three Uptime Kuma push tokens in run-job.ps1) lived
   # in, so the guard was blind precisely where it was needed. Anchor the
   # exclusion after the separator: safe means the VALUE is a variable.
+  # Also allow an assignment whose variable name ends in "Name" -- e.g.
+  # run-job.ps1's PushTokenName holds the KEY to look up in secrets.env
+  # (used as a dictionary index), never the secret value itself. Incident
+  # 2026-08-07: this pattern blocked a legitimate commit right before the
+  # repo went public. Anchored to the assigned-to side ending in "Name" so an
+  # actual token/secret assignment still trips the guard.
   offenders=$(printf '%s' "$added" \
     | grep -iE "$SECRET_RE" \
-    | grep -vE "[:=][[:space:]]*['\"]?\\\$|example|EXAMPLE|placeholder|REDACTED|xxxx" || true)
+    | grep -vE "[:=][[:space:]]*['\"]?\\\$|example|EXAMPLE|placeholder|REDACTED|xxxx" \
+    | grep -viE "^\+?\s*[A-Za-z0-9_]*Name\s*[:=]" || true)
   if [ -n "$offenders" ]; then
     printf '\nBLOCKED: a hardcoded credential appears in the staged changes.\n' >&2
     printf '%s\n' "$offenders" | head -10 | while read -r l; do note "$l"; done

@@ -336,18 +336,53 @@ fi
 # one that cost 16G of invisible waste on 2026-07-27, is an unimported download
 # sitting there WHILE the library is still missing episodes. So the count is
 # split, and only the second kind is a warning.
+#
+# Blocklisted releases are excluded outright. A blocklisted download is not an
+# orphan Sonarr forgot about -- it is one that something already decided
+# against, and rolling-window.sh clears exactly this shape (a completed download
+# rejected as "Not an upgrade") by dropping the queue row, blocklisting the
+# release and leaving the torrent seeding. Counting those turned a deliberate
+# decision into a warning nothing could ever clear: the intended end state IS
+# the file sitting there seeding, and the DownloadedEpisodesScan it asked for
+# would refuse to import them every time.
+BL_B64=$(sonarr "/api/v3/blocklist?pageSize=1000" \
+         | jqs -r '.records[]?.sourceTitle' | base64 -w0 2>/dev/null)
 orph=$(docker exec sonarr sh -c '
+  printf "%s" "$1" | base64 -d > /tmp/audit-blocklist.txt 2>/dev/null || : > /tmp/audit-blocklist.txt
   n=0; b=0
   for d in /data/torrents/complete/*; do
     [ -e "$d" ] || continue
-    f=$(find "$d" -type f \( -name "*.mkv" -o -name "*.mp4" \) 2>/dev/null | head -1)
-    [ -z "$f" ] && continue
-    ino=$(stat -c %i "$f" 2>/dev/null)
-    if ! find /data/library -inum "$ino" 2>/dev/null | grep -q .; then
+    base=$(basename "$d")
+    # Substring, not equality: the torrent directory carries the tracker prefix
+    # ("www.UIndex.org    -    <release>") while Sonarr blocklists the clean
+    # release name, so an exact match never fires.
+    skip=0
+    while IFS= read -r bl; do
+      [ -z "$bl" ] && continue
+      case "$base" in *"$bl"*) skip=1; break ;; esac
+    done < /tmp/audit-blocklist.txt
+    [ "$skip" = "1" ] && continue
+    # A season pack is orphaned only if NOTHING in it made it into the library.
+    # Testing just the first file called every pack an orphan: the rolling
+    # window imports the in-window episodes and deliberately leaves the rest, so
+    # a 24-episode pack legitimately has 21 unlinked files in it.
+    linked=0; any=0; tmpf=/tmp/audit-files.txt
+    find "$d" -type f \( -name "*.mkv" -o -name "*.mp4" \) > "$tmpf" 2>/dev/null
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      any=1
+      ino=$(stat -c %i "$f" 2>/dev/null)
+      [ -z "$ino" ] && continue
+      if find /data/library -inum "$ino" 2>/dev/null | grep -q .; then linked=1; break; fi
+    done < "$tmpf"
+    rm -f "$tmpf"
+    [ "$any" = "0" ] && continue
+    if [ "$linked" = "0" ]; then
       n=$((n+1)); b=$((b + $(du -s "$d" 2>/dev/null | cut -f1)))
     fi
   done
-  echo "$n $((b/1048576))"' 2>/dev/null)
+  rm -f /tmp/audit-blocklist.txt
+  echo "$n $((b/1048576))"' _ "$BL_B64" 2>/dev/null)
 on=$(printf '%s' "$orph" | awk '{print $1+0}')
 ob=$(printf '%s' "$orph" | awk '{print $2+0}')
 # MISSING_ANY is set by the per-series loop above.
@@ -607,10 +642,17 @@ sec "15. Non-media stacks"
 # and name resolution died on every device at once. The lesson is not "add
 # AdGuard" -- it is that a service absent from this list fails invisibly. Every
 # stack gets checked here, not just the media ones.
+# glances, not server-room-glances-1: the server-room compose file gained an
+# explicit container_name on 2026-07-28, which renamed the container. This list
+# still held the old compose-generated name, so the very next audit would have
+# reported "container server-room-glances-1 is 'missing'" while Glances was
+# running perfectly. Section 18 now cross-checks this list against the
+# container_name lines in Stacks/ so a rename cannot desynchronise it silently
+# again.
 OTHER_CONTAINERS="adguardhome immich-immich-server-1 immich-database-1 immich-redis-1 \
 immich-immich-machine-learning-1 vaultwardem-vaultwarden-1 vikunja-vikunja-1 \
 filebrowser-filebrowser-1 homarr-homarr-1 uptime-kuma-uptime-kuma-1 portainer \
-server-room-glances-1 navidrome"
+glances navidrome"
 for c in $OTHER_CONTAINERS; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
   if [ "$st" != "running" ]; then
@@ -702,18 +744,58 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
     im_total=$(grep -c . /tmp/_immich_paths.txt 2>/dev/null || echo 0)
     if [ "${im_total:-0}" -gt 0 ]; then
       docker cp /tmp/_immich_paths.txt "$IM_SRV:/tmp/_audit_paths.txt" >/dev/null 2>&1
-      im_missing=$(docker exec "$IM_SRV" sh -c '
-        m=0; while IFS= read -r p; do
+      # Emit the PATHS, not just a count. Verified 2026-07-28 against
+      # bind-Immich_20260728-175630.tar.gz: none of the 105 known-lost files
+      # are in any backup, because the loss predates the first backup on
+      # 2026-07-27. They are gone permanently and no further run will change
+      # that -- so a bare count means this check would FAIL forever, and an
+      # audit that is permanently red is one people stop reading. That is the
+      # same failure mode as having no check at all.
+      #
+      # Instead: the 105 already-lost paths are recorded in a baseline file, and
+      # only a loss NOT in that baseline fails. The tripwire keeps working for
+      # the next occurrence, which is the reason the check was written.
+      #
+      # The audit NEVER writes the baseline. It is a human decision to declare a
+      # file permanently lost, and a check that quietly absorbs new losses into
+      # its own baseline is worse than useless. Regenerate deliberately with:
+      #   docker exec immich-database-1 psql -U "<user>" -d immich -t -A \
+      #     -c 'SELECT "originalPath" FROM asset WHERE "deletedAt" IS NULL;' ...
+      docker exec "$IM_SRV" sh -c '
+        while IFS= read -r p; do
           [ -z "$p" ] && continue
-          [ -f "$p" ] || m=$((m+1))
-        done < /tmp/_audit_paths.txt; echo "$m"' 2>/dev/null)
+          [ -f "$p" ] || printf "%s\n" "$p"
+        done < /tmp/_audit_paths.txt' 2>/dev/null | tr -d '\r' | sort > /tmp/_immich_missing.txt
       docker exec "$IM_SRV" rm -f /tmp/_audit_paths.txt >/dev/null 2>&1
       rm -f /tmp/_immich_paths.txt
-      if [ "${im_missing:-0}" -gt 0 ]; then
-        fail "Immich: ${im_missing}/${im_total} assets have no original file on disk -- downloads for those fail, thumbnails still render so the UI looks fine"
-      else
+      im_missing=$(grep -c . /tmp/_immich_missing.txt 2>/dev/null || echo 0)
+      IM_BASELINE="${IM_BASELINE:-/c/ServerData/Stacks/immich-lost-baseline.txt}"
+      if [ "${im_missing:-0}" -eq 0 ]; then
         ok "Immich: all ${im_total} active assets have their original file"
+      elif [ ! -f "$IM_BASELINE" ]; then
+        fail "Immich: ${im_missing}/${im_total} assets have no original file on disk, and no baseline exists at $IM_BASELINE -- downloads for those fail, thumbnails still render so the UI looks fine"
+      else
+        # tr -d '\r' on the BASELINE side too, not just the docker side.
+        # comm compares whole lines byte for byte. The baseline is gitignored
+        # (*.txt) so it lives only on this Windows box, and one save from an
+        # editor that writes CRLF would have appended \r to all 105 known-lost
+        # paths -- none of which would then match, so every one reads as a
+        # NEWLY missing original and this check hard-FAILs with a fabricated
+        # fresh-loss alarm. Verified LF-only today; defended so it stays true.
+        #
+        # Computed once into a temp file rather than running the same comm
+        # pipeline twice, once for the count and again for the example path.
+        comm -23 /tmp/_immich_missing.txt \
+             <(tr -d '\r' < "$IM_BASELINE" | grep -v '^#' | grep . | sort) \
+             > /tmp/_immich_new.txt
+        im_new=$(grep -c . /tmp/_immich_new.txt 2>/dev/null || echo 0)
+        if [ "${im_new:-0}" -gt 0 ]; then
+          fail "Immich: ${im_new} NEWLY missing original(s) beyond the ${im_missing} known lost -- this is a fresh loss, and a backup may still hold them. First: $(head -1 /tmp/_immich_new.txt)"
+        else
+          warn "Immich: ${im_missing}/${im_total} assets have no original file -- all of them are the known, permanently lost set recorded in $(basename "$IM_BASELINE"); nothing new"
+        fi
       fi
+      rm -f /tmp/_immich_missing.txt /tmp/_immich_new.txt
     else
       warn "Immich: could not read the asset list from Postgres"
     fi
@@ -730,7 +812,7 @@ sec "18. Docker daemon hygiene"
 # it takes down every service at once -- with no warning, because nothing here
 # was looking. The daemon-level setting covers containers that have no compose
 # file in this tree (Immich, Traccar, Portainer, AdGuard) as well as those that do.
-DAEMON_JSON="${RW_DAEMON_JSON:-/c/Users/Naiti/.docker/daemon.json}"
+DAEMON_JSON="${RW_DAEMON_JSON:-/c/Users/${USER:-$USERNAME}/.docker/daemon.json}"
 if [ -r "$DAEMON_JSON" ]; then
   if grep -q '"max-size"' "$DAEMON_JSON"; then
     ok "docker daemon has a log size limit configured"
@@ -788,6 +870,52 @@ if [ "$stray" -gt 0 ]; then
   warn "$stray container(s) are not defined by a compose file in Stacks/ -- not backed up, not in version control:$stray_names"
 else
   ok "every running container is defined from Stacks/"
+fi
+
+# Incident 2026-07-28: server-room/docker-compose.yml gained an explicit
+# `container_name: glances`, which renamed the container from the
+# compose-generated server-room-glances-1. Section 15's expected-container list
+# still held the old name, so the next audit would have failed on a healthy
+# service -- and the mirror-image mistake (a NEW service nobody adds to the
+# list) fails the other way, silently, which is how AdGuard went missing.
+#
+# The check above asks "is every running container defined in Stacks/". These
+# two ask the reverse, which is where both of those bugs actually live:
+#   a) every container_name declared in Stacks/ is running, or is explicitly
+#      recorded below as deliberately not deployed;
+#   b) every running container appears in one of this script's own checked
+#      lists, so a rename or an addition cannot quietly go unmonitored.
+#
+# NOT_DEPLOYED is an allowlist on purpose: "we chose not to run this" has to be
+# a recorded decision, not the same silence as "this died". Empty right now --
+# it held the three music-alexa containers until that stack was dropped on
+# 2026-07-28. Keep the mechanism: the next deliberately-dormant stack needs it,
+# and an empty list is not the same thing as no list.
+NOT_DEPLOYED=""
+declared=$(grep -rhE '^\s*container_name:\s*\S+' /c/ServerData/Stacks/*/docker-compose.yml 2>/dev/null \
+           | sed -E 's/^\s*container_name:\s*//' | tr -d '\r' | sort -u)
+missing=""; undeployed=0
+for c in $declared; do
+  case " $NOT_DEPLOYED " in *" $c "*) undeployed=$((undeployed+1)); continue ;; esac
+  docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null | grep -q running || missing="$missing $c"
+done
+if [ -n "$missing" ]; then
+  fail "container_name declared in Stacks/ but not running:$missing"
+else
+  ok "every container_name declared in Stacks/ is running ($undeployed deliberately not deployed)"
+fi
+
+unchecked=""
+for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
+  case " $EXPECTED $OTHER_CONTAINERS " in
+    *" $c "*) ;;
+    *) unchecked="$unchecked $c" ;;
+  esac
+done
+if [ -n "$unchecked" ]; then
+  fail "running container(s) absent from this audit's checked lists -- they fail invisibly:$unchecked"
+else
+  ok "every running container is covered by an audit check"
 fi
 
 # Gated on the helper EXISTING, not on credsStore being configured. An earlier

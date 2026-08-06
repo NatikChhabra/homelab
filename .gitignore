@@ -12,6 +12,7 @@
 # --- structure ---------------------------------------------------------------
 !.gitignore
 !README.md
+!LICENSE
 !*/
 
 # --- the actual stack definitions --------------------------------------------
@@ -20,7 +21,18 @@
 # --- automation --------------------------------------------------------------
 !*.sh
 !*.ps1
+!*.py
 !glances-kiosk.bat
+
+# Config files a compose file bind-mounts. server-room/glances.conf was ignored
+# by the catch-all above while server-room/docker-compose.yml required it, so a
+# clone-and-up rebuilt a BROKEN Glances: Docker Desktop auto-creates a directory
+# at a bind-mount path whose source is missing, and `glances -C <directory>`
+# does not fail loudly -- it silently reverts to the defaults the config exists
+# to correct (empty sensors panel, three fake 1TB disks). The file also sits
+# outside backup-volumes.sh's BIND_DIRS, so the live C: drive was its only copy.
+# Any *.conf a stack mounts belongs in git for exactly this reason.
+!*.conf
 
 # The pre-commit secret guard has no extension, so the allowlist above would
 # drop it. Enable it after cloning with: git config core.hooksPath .githooks
