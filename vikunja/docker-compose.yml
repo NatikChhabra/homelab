@@ -5,7 +5,8 @@ services:
     ports:
       - "3456:3456"
     environment:
-      VIKUNJA_SERVICE_PUBLICURL: "http://100.80.120.33:3456"
+      # TAILSCALE_IP comes from vikunja/.env (gitignored). See .env.example.
+      VIKUNJA_SERVICE_PUBLICURL: "http://${TAILSCALE_IP:?set in Stacks/vikunja/.env}:3456"
     volumes:
       - C:/ServerData/Vikunja/files:/app/vikunja/files
       - C:/ServerData/Vikunja/db:/db

@@ -7,6 +7,22 @@ them honest.
 This repository is the *configuration* for that server. It deliberately contains
 no application data, no databases, and no credentials.
 
+Published as a reference / portfolio piece, not a turnkey installer. It's my
+real setup, so paths, IPs and ports below are mine — see **Getting started**
+for what to change before any of this runs on your own hardware. Licensed MIT
+(see `LICENSE`): copy whatever is useful.
+
+**Why look at this repo:**
+- A worked example of a multi-service Docker Compose homelab: the *arr stack,
+  Jellyfin, Immich, Vikunja, Vaultwarden, Uptime Kuma, Homarr, wired together
+  with per-stack networks and cross-stack status checks.
+- An allowlist `.gitignore` + pre-commit secret scanner (`.githooks/pre-commit`)
+  for a repo that mixes real infrastructure config with public visibility.
+- A read-only health-audit script (`server-audit.sh`) that encodes real past
+  incidents as checks, each with a comment naming what broke.
+- Documented Docker-Desktop-on-Windows/WSL2 quirks (port publishing, DNS
+  binding) that cost real debugging time — see **Networking** below.
+
 ---
 
 ## What runs here
@@ -95,6 +111,34 @@ nobody thought to exclude is the one that leaks.
 
 To rotate a credential, change it in `secrets.env` only. Nothing else needs
 editing.
+
+## Getting started
+
+This is a real, running server's config, adapted for public reading rather than
+built as a generic installer. Expect to read and edit before running.
+
+**Prerequisites:** Docker Desktop with WSL2 backend on Windows. Most of this
+adapts to plain Docker on Linux — drop the Windows-specific pieces
+(`PUID`/`PGID`, `C:` drive-letter bind mounts, `.wslconfig`, the Task Scheduler
+jobs, `docker-pull.sh`) and it's a standard Compose tree.
+
+1. Clone the repo.
+2. `git config core.hooksPath .githooks` — enables the pre-commit scan that
+   blocks committing a credential. See **Secrets** above for why this exists.
+3. For each stack that ships a `.env.example` (currently `homarr/`, `immich/`,
+   `vikunja/`), copy it to `.env` in that directory and fill in real values.
+4. Create `secrets.env` in the repo root for the automation scripts (API keys,
+   Uptime Kuma push tokens, qBittorrent credentials — grep the scripts for
+   `SECRETS_FILE` / `$Secrets[` to see every key they expect). Nothing in this
+   repo ships with real credentials in it.
+5. Replace the paths (`C:/ServerData/...`, `D:/Media/...`) and any Tailscale/LAN
+   IPs in the compose files and scripts with your own. `grep -rn` for
+   `C:/ServerData` and `100\.` across the tree will find what's left.
+6. From inside a stack directory: `docker compose up -d`.
+7. `bash server-audit.sh` to sanity-check what came up. Several checks assume
+   pieces of my setup (the *arr apps, a specific media layout) and will WARN
+   or FAIL harmlessly if you haven't brought those stacks up — read the check
+   name before treating it as a real problem.
 
 ## Automation
 

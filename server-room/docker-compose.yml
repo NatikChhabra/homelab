@@ -1,12 +1,31 @@
 services:
   glances:
     image: nicolargo/glances:latest
+    container_name: glances
     restart: always
+    # Host PID namespace, so the process list is the machine's rather than this
+    # container's one process.
     pid: host
     ports:
       - "61208:61208"
     environment:
-      - "GLANCES_OPT=-w"
+      # -C points at the config below. Without it Glances runs on defaults and
+      # renders a permanently empty sensors panel plus three fake 1TB "disks"
+      # (Docker's injected /etc/hosts, /etc/hostname, /etc/resolv.conf).
+      - "GLANCES_OPT=-w -C /etc/glances/glances.conf"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-
+      - ./glances.conf:/etc/glances/glances.conf:ro
+      # NO DISK MOUNTS HERE, deliberately. Bind-mounting C:/ and D:/ in was
+      # tried on 2026-07-28 to get real Windows disk usage and does not work:
+      # Docker Desktop exposes them as 9p filesystems, and psutil.disk_partitions
+      # -- which the Glances fs plugin is built on -- returns only physical
+      # filesystems, so 9p mounts are invisible to it no matter how the config
+      # is written. Verified directly: the mounts were present in /proc/mounts
+      # with the correct sizes while the fs plugin still returned [].
+      #
+      # The mounts were therefore removed rather than left in place, because
+      # they gave the container read access to all of C: (including
+      # Stacks/secrets.env) in exchange for nothing.
+      #
+      # Windows disk usage is covered by server-audit.sh section 4 instead.

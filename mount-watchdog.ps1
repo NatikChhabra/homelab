@@ -30,6 +30,59 @@ $HostPath  = 'D:\Media\library'
 $Probe     = 'sonarr'
 $MinSizeGB = 100
 
+# ---- Uptime Kuma heartbeat (added 2026-07-28) ------------------------------
+# This watchdog guards the failure it was written for, but nothing guarded the
+# watchdog. It runs every 10 minutes from Task Scheduler, and if the task itself
+# stopped -- disabled, erroring on startup, machine rebooted into a bad state --
+# the media mount would be unmonitored again and nobody would know. That is the
+# same silent-failure shape the script exists to prevent.
+#
+# 127.0.0.1, not localhost: PowerShell resolves localhost to ::1 first and
+# Uptime Kuma only listens on IPv4, so the heartbeat would silently time out.
+$KumaBase = 'http://127.0.0.1:3001'
+$PushToken = ''
+try {
+    foreach ($line in (Get-Content 'C:\ServerData\Stacks\secrets.env' -ErrorAction Stop)) {
+        if ($line -match '^\s*KUMA_PUSH_MOUNT_WATCHDOG\s*=\s*(.*?)\s*$') {
+            $PushToken = $Matches[1].Trim("'`"")
+        }
+    }
+} catch {}
+
+function Send-Heartbeat {
+    param([string]$State, [string]$Message)
+    # Never let a monitoring failure become a watchdog failure: if Kuma is down
+    # this must not stop the mount from being repaired.
+    if ([string]::IsNullOrWhiteSpace($PushToken)) {
+        Log 'WARN  no KUMA_PUSH_MOUNT_WATCHDOG in secrets.env - heartbeat skipped'
+        return
+    }
+    # Built OUTSIDE the try: if the expansion itself threw, the catch below
+    # referenced an unassigned $u and logged an empty url= field.
+    #
+    # $($PushToken), not $PushToken: PowerShell treats '?' as part of an
+    # unbraced variable name, so "$PushToken?status=" parsed as a variable
+    # called PushToken?status, expanded to nothing, and produced
+    # /api/push/=up -- a 404 that the old silent catch hid completely.
+    $u = "$KumaBase/api/push/$($PushToken)?status=$State&msg=$([uri]::EscapeDataString($Message))"
+    try {
+        Invoke-RestMethod -Uri $u -TimeoutSec 15 | Out-Null
+    } catch {
+        # Logged rather than swallowed. A silent catch here is what made a
+        # non-firing heartbeat look identical to a healthy one during setup.
+        #
+        # The token is REDACTED out of the logged URL. This log is plain text on
+        # C: and backup-volumes.sh copies it to D: nightly, so logging the push
+        # URL whole wrote a live credential into every backup -- the same thing
+        # CLAUDE.md forbids for hardcoded keys, and one that server-audit.sh's
+        # "no credentials hardcoded in scripts" check cannot see because the
+        # secret is emitted at runtime rather than written in the source. The
+        # path shape is what makes a 404 diagnosable; the token is not.
+        $safeUrl = $u -replace '/api/push/[^?]*', '/api/push/<redacted>'
+        Log ('WARN  heartbeat failed: {0}  url={1}' -f $_.Exception.Message, $safeUrl)
+    }
+}
+
 function Log($msg) {
     $line = ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ'), $msg)
     Add-Content -Path $LogFile -Value $line
@@ -59,6 +112,7 @@ function Test-DataMount {
 
 if (Test-DataMount) {
     Log 'OK  /data mount healthy'
+    Send-Heartbeat -State 'up' -Message '/data mount healthy'
     exit 0
 }
 
@@ -72,6 +126,7 @@ if (-not (Test-Path $HostPath)) {
         Write-EventLog -LogName Application -Source 'ServerDataJobs' -EntryType Error -EventId 1010 `
             -Message "mount-watchdog: D: media drive missing on the host. Physical problem - Docker restart skipped."
     } catch {}
+    Send-Heartbeat -State 'down' -Message 'D: missing on the HOST - physical problem, check cable/enclosure'
     exit 2
 }
 
@@ -98,6 +153,9 @@ if (Test-DataMount) {
         Write-EventLog -LogName Application -Source 'ServerDataJobs' -EntryType Warning -EventId 1011 `
             -Message "mount-watchdog: D: media mount had died and was repaired by restarting Docker Desktop."
     } catch {}
+    # 'up', but the message carries the repair so it is visible in Kuma's
+    # history rather than looking like an uneventful cycle.
+    Send-Heartbeat -State 'up' -Message 'REPAIRED - mount had died, fixed by Docker Desktop restart'
     exit 0
 }
 
@@ -106,4 +164,5 @@ try {
     Write-EventLog -LogName Application -Source 'ServerDataJobs' -EntryType Error -EventId 1012 `
         -Message "mount-watchdog: D: media mount still dead after a Docker Desktop restart."
 } catch {}
+Send-Heartbeat -State 'down' -Message 'mount STILL DEAD after Docker Desktop restart - needs a human'
 exit 1

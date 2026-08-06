@@ -37,17 +37,77 @@
 set -uo pipefail
 
 # ----------------------------- CONFIG ---------------------------------------
-WINDOW_SIZE="${RW_WINDOW_SIZE:-3}"      # unwatched episodes queued ahead of watch position
+# WINDOW REMOVED 2026-07-28, at the user's instruction. 0 means "no window":
+# whole requested seasons are monitored and searched, not three episodes at a
+# time. The delete-after-watching rule is deliberately KEPT -- that part works
+# and was explicitly not to be touched.
+#
+# 0 is translated to a very large number a few lines down so the window-slot
+# test needs no special case. That sentinel is CORRECT for the slot test and
+# WRONG everywhere else it was being read: the stuck-skip cap and the search
+# batch were both derived from WINDOW_SIZE and silently became unbounded at
+# 999999. Both now have their own limits below. The rule to hold to is that
+# WINDOW_SIZE means "how many unwatched episodes to keep ahead" and nothing
+# else -- any other limit that happens to have been 3 gets its own knob.
+WINDOW_SIZE="${RW_WINDOW_SIZE:-0}"      # 0 = unlimited; N = keep N unwatched ahead
 DRY_RUN="${RW_DRY_RUN:-true}"           # true = report only
 DELETE_WATCHED="${RW_DELETE_WATCHED:-true}"  # delete files of confirmed-watched episodes
 
-# Keep at most WINDOW_SIZE unwatched files on disk per show. Anything further
-# ahead than the window is deleted even though it was never watched -- this is
-# a deliberate exception to the "only delete confirmed-watched" rule, approved
-# 2026-07-26 so the disk cap matches the 3-episode download window. Nothing is
-# lost permanently: an episode deleted this way is re-grabbed automatically
-# once the watch position advances and it re-enters the window.
-DELETE_UNWATCHED_BEYOND_WINDOW="${RW_DELETE_UNWATCHED:-true}"
+# Reject a non-numeric tuning value loudly. `[ "$x" -le 0 ]` on a non-number
+# errors, and the original wrote that test as `2>/dev/null` so it errored
+# SILENTLY: the test returned false, WINDOW_UNLIMITED stayed false, and every
+# later comparison against the garbage value also failed, so the script ran to
+# completion having monitored nothing and logged no reason. A typo in the Task
+# Scheduler environment must not degrade into a no-op that reports success.
+#
+# Checked with the sign stripped first. A pattern like *[!0-9-]* looks
+# sufficient but accepts "1-2" and "--5", which land right back in the silent
+# failure it was written to prevent.
+require_int() {  # $1=name $2=value
+  local v="${2#-}"
+  case "$v" in
+    ''|*[!0-9]*) echo "FATAL: $1='$2' is not an integer" >&2; exit 2 ;;
+  esac
+}
+require_int RW_WINDOW_SIZE       "$WINDOW_SIZE"
+require_int RW_STUCK_SKIP_CAP    "${RW_STUCK_SKIP_CAP:-3}"
+require_int RW_MAX_SEARCH_BATCH  "${RW_MAX_SEARCH_BATCH:-12}"
+require_int RW_MIN_FREE_GB       "${RW_MIN_FREE_GB:-40}"
+
+WINDOW_UNLIMITED=false
+if [ "$WINDOW_SIZE" -le 0 ]; then
+  WINDOW_UNLIMITED=true
+  WINDOW_SIZE=999999
+fi
+
+# Two limits that were WINDOW_SIZE-derived and must not be, now that
+# WINDOW_SIZE can be a 999999 sentinel:
+#
+#   STUCK_SKIP_CAP -- how many unobtainable episodes may be skipped over per
+#   series before the walk stops extending. At 999999 a season with no
+#   available releases would skip every episode in it, search all of them, and
+#   log a STUCK line for each, every 20 minutes. It is a safety cap, not a
+#   window property.
+#
+#   MAX_SEARCH_BATCH -- how many episode ids may go into one EpisodeSearch. The
+#   old 3-episode window capped this implicitly at ~3 per series; with the
+#   window removed, the first run after a season is requested queues the WHOLE
+#   season at once. With 36 indexers enabled that is one burst of hundreds of
+#   indexer queries, which is how an account gets rate-limited or banned.
+#   Anything over the cap simply waits for the next 20-minute cycle.
+STUCK_SKIP_CAP="${RW_STUCK_SKIP_CAP:-3}"
+MAX_SEARCH_BATCH="${RW_MAX_SEARCH_BATCH:-12}"
+
+# Deleting unwatched files existed ONLY to make the disk cap match the
+# 3-episode download window. With the window gone there is nothing for it to
+# enforce, and leaving it on would delete episodes that were just downloaded
+# and never watched. Off by default now; the watched-file deletion above is
+# untouched and still does the actual reclaiming.
+if [ "$WINDOW_UNLIMITED" = "true" ]; then
+  DELETE_UNWATCHED_BEYOND_WINDOW="${RW_DELETE_UNWATCHED:-false}"
+else
+  DELETE_UNWATCHED_BEYOND_WINDOW="${RW_DELETE_UNWATCHED:-true}"
+fi
 
 # Setting an episode monitored does NOT make Sonarr look for it. Monitoring only
 # tells Sonarr "accept this if it shows up"; the RSS sync just reads what
@@ -169,7 +229,11 @@ EXIT_CODE=0
 SKIPPED=0
 
 log "=========================================================="
-log "rolling-window START  WINDOW_SIZE=$WINDOW_SIZE  DRY_RUN=$DRY_RUN  DELETE_WATCHED=$DELETE_WATCHED"
+if [ "$WINDOW_UNLIMITED" = "true" ]; then
+  log "rolling-window START  WINDOW=UNLIMITED (full seasons)  DRY_RUN=$DRY_RUN  DELETE_WATCHED=$DELETE_WATCHED  DELETE_UNWATCHED=$DELETE_UNWATCHED_BEYOND_WINDOW"
+else
+  log "rolling-window START  WINDOW_SIZE=$WINDOW_SIZE  DRY_RUN=$DRY_RUN  DELETE_WATCHED=$DELETE_WATCHED"
+fi
 log "=========================================================="
 
 # ---- 0. Preflight: both containers must answer, or we abort loudly ---------
@@ -180,6 +244,54 @@ fi
 if ! jf "/System/Info" | grep -q '"Version"'; then
   log "FATAL  Jellyfin API unreachable — aborting, nothing touched."
   exit 2
+fi
+
+# ---- 0b. Disk floor --------------------------------------------------------
+# Added 2026-07-28 with the window removal. While the window was 3 episodes,
+# the amount this script could pull was bounded by construction: at most 3
+# unwatched files per series at a time, and anything further ahead was deleted.
+# Both of those bounds are now gone -- whole seasons are monitored and
+# DELETE_UNWATCHED is off -- so the only remaining limit on how much this puts
+# on D: is how much the indexers hand over. Within 3.5 hours of going live it
+# had taken D: from 404 GB free to 381 GB and qBittorrent from 7 torrents to 35.
+#
+# Searching is what stops; deleting watched files and cancelling downloads
+# still runs, because those RECLAIM space. Stopping them at a low disk mark
+# would be exactly backwards.
+#
+# FAIL CLOSED. The first version of this block read
+#   if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$MIN_FREE_GB" ]
+# which treated "could not measure the disk" as "the disk is fine" and let the
+# run search on unbounded. That is the wrong way round, and it is worst in the
+# exact scenario mount-watchdog.ps1 exists to catch: when D: has dropped, `df`
+# prints nothing, FREE_GB is empty, and the safety limit silently switches
+# itself off at the one moment it is needed. It also contradicted require_int
+# forty lines above, which exists precisely to refuse to degrade into a silent
+# no-op. An unreadable disk is now treated as a breached floor.
+FREE_GB=$(df -P /d 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
+MIN_FREE_GB="${RW_MIN_FREE_GB:-40}"
+# The floor is a designed, self-recovering state, not a fault: watched-file
+# deletion keeps running and reclaims space as episodes are viewed. Marking the
+# run FAILED turned the Kuma monitor red and wrote an event-log Error on every
+# 20-minute cycle for as long as the disk stayed low -- so the one monitor that
+# matters became noise, and a genuine failure would have been indistinguishable
+# from it. Same reasoning as RW_AUDIT_OK_ON_WARN for the weekly audit. Set
+# RW_FAIL_ON_DISK_FLOOR=true to get the old paging behaviour back.
+FAIL_ON_DISK_FLOOR="${RW_FAIL_ON_DISK_FLOOR:-false}"
+if [ -z "$FREE_GB" ]; then
+  SEARCH_MISSING=false
+  log "DISK FLOOR    could not read free space on D: (df returned nothing) — searches DISABLED this run."
+  log "              Failing closed on purpose: an unmeasurable disk is treated as a full one. If D: has"
+  log "              dropped off the host, mount-watchdog.ps1 is the thing that repairs it."
+  [ "$FAIL_ON_DISK_FLOOR" = "true" ] && EXIT_CODE=1
+elif [ "$FREE_GB" -lt "$MIN_FREE_GB" ]; then
+  SEARCH_MISSING=false
+  log "DISK FLOOR    only ${FREE_GB}G free on D: (floor ${MIN_FREE_GB}G) — searches DISABLED this run."
+  log "              Watched-file deletion and download cancellation still run, so this recovers on its own"
+  log "              as episodes are watched. Raise RW_MIN_FREE_GB only if you know what is filling the disk."
+  [ "$FAIL_ON_DISK_FLOOR" = "true" ] && EXIT_CODE=1
+else
+  log "disk          ${FREE_GB}G free on D: (floor ${MIN_FREE_GB}G)"
 fi
 
 # ---- 1. Map Jellyfin series to Sonarr series -------------------------------
@@ -281,6 +393,52 @@ was_watched() {
 
 LEDGER_ADDED=0
 log "Watch ledger: $(wc -l < "$LEDGER" | tr -d ' ') episodes previously confirmed watched"
+
+# ---- 1b2. Clear downloads Sonarr can never import ---------------------------
+# A completed download that Sonarr refuses to import sits in the queue as
+# importPending forever and nothing reaps it: the torrent is complete, so it is
+# not "stalled" and none of Cleanuparr's rules match, and the queue row is not
+# an error either, so no health check fires. It just quietly occupies the queue.
+#
+# Incident 2026-07-27: a Bluray S01 pack for The Mentalist was grabbed at
+# 09:40. The walk at 09:55 still saw S1E1-E3 as "monitored but missing",
+# because the pack had not imported yet, and searched them. The WEBDL singles
+# that came back finished AFTER the pack had given those episodes Bluray files,
+# so each was rejected with "Not an upgrade for existing episode file(s)" and
+# stayed in the queue for two days, counted as a warning by the audit every run.
+#
+# The removal is deliberately narrow:
+#   removeFromClient=false  torrent keeps seeding -- no data deleted, no ratio
+#                           lost. It is a legitimate release, just not wanted.
+#   blocklist=true          Sonarr will not grab that same release again.
+#   skipRedownload=true     no replacement search. The episode already has the
+#                           better file; that is precisely why this was rejected.
+# Matched on the rejection text, so a download that is merely mid-import is
+# never touched.
+TOTAL_UNIMPORTABLE=0
+UNIMP_TMP=$(mktemp)
+sonarr "/api/v3/queue?pageSize=1000&includeUnknownSeriesItems=true" \
+  | jq_c -r '.records[]?
+             | select([.statusMessages[]?.messages[]?] | join(" ") | test("Not an upgrade"))
+             | "\(.id)|\(.title)"' \
+  > "$UNIMP_TMP" 2>/dev/null
+while IFS='|' read -r uqid utitle; do
+  [ -z "$uqid" ] && continue
+  if [ "$DRY_RUN" = "true" ]; then
+    log "WOULD CLEAR   unimportable queue row $uqid ($utitle) - rejected as not an upgrade"
+    TOTAL_UNIMPORTABLE=$((TOTAL_UNIMPORTABLE+1))
+    continue
+  fi
+  code=$(sonarr_delq "/api/v3/queue/$uqid?removeFromClient=false&blocklist=true&skipRedownload=true")
+  if [ "$code" = "200" ] || [ "$code" = "204" ]; then
+    log "CLEARED       unimportable $utitle (queueId=$uqid, not an upgrade; torrent left seeding, release blocklisted)"
+    TOTAL_UNIMPORTABLE=$((TOTAL_UNIMPORTABLE+1))
+  else
+    log "CLEAR FAILED  queueId=$uqid ($utitle) http=$code"
+    EXIT_CODE=1
+  fi
+done < "$UNIMP_TMP"
+rm -f "$UNIMP_TMP"
 
 # ---- 1c. Snapshot Sonarr's download queue ----------------------------------
 # Unmonitoring an episode does NOT cancel a download already in flight: the
@@ -754,7 +912,13 @@ while IFS= read -r srow; do
   if [ "$ACTIVE_SEASON" -ge 0 ]; then
     log "  active season : S${ACTIVE_SEASON}  ($REMAINING unwatched episodes remaining)"
     if [ "$UNLOCKED_SEASON" -ge 0 ]; then
-      log "  UNLOCK        : S${ACTIVE_SEASON} within $WINDOW_SIZE of done -> S${UNLOCKED_SEASON} promoted to active"
+      if [ "$WINDOW_UNLIMITED" = "true" ]; then
+        log "  UNLOCK        : window unlimited -> S${UNLOCKED_SEASON} promoted to active alongside S${ACTIVE_SEASON}"
+      else
+        log "  UNLOCK        : S${ACTIVE_SEASON} within $WINDOW_SIZE of done -> S${UNLOCKED_SEASON} promoted to active"
+      fi
+    elif [ "$WINDOW_UNLIMITED" = "true" ]; then
+      log "  later seasons : DORMANT (no further REQUESTED season after S${ACTIVE_SEASON})"
     else
       log "  later seasons : DORMANT (S${ACTIVE_SEASON} has $REMAINING left, unlock at <=$WINDOW_SIZE)"
     fi
@@ -824,10 +988,12 @@ while IFS= read -r srow; do
       # unobtainable, occupying a slot would silently shrink the buffer -- with
       # WINDOW_SIZE=3 and one stuck episode you would only ever have 2 episodes
       # ready. Skip it (leaving it monitored, in case a release appears later)
-      # and let the next episode take the slot instead. Capped at WINDOW_SIZE
-      # skips per series so a wholly-unavailable season cannot make this monitor
-      # the entire show.
-      if [ "$ehas" != "true" ] && is_stuck "$eid" && [ "$STUCK_SKIPS" -lt "$WINDOW_SIZE" ]; then
+      # and let the next episode take the slot instead. Capped at
+      # STUCK_SKIP_CAP skips per series so a wholly-unavailable season cannot
+      # make this monitor the entire show. That cap used to be WINDOW_SIZE,
+      # which became 999999 -- effectively no cap at all -- when the window was
+      # removed on 2026-07-28.
+      if [ "$ehas" != "true" ] && is_stuck "$eid" && [ "$STUCK_SKIPS" -lt "$STUCK_SKIP_CAP" ]; then
         STUCK_SKIPS=$((STUCK_SKIPS+1))
         atts=$(search_attempts "$eid")
         reason=$(stuck_reason "$eid")
@@ -947,6 +1113,36 @@ log "=========================================================="
 # 3a. Search for everything in-window that is still missing.
 SEARCH_COUNT=0
 if [ -n "$SEARCH_BATCH" ]; then
+  # Cap the burst. With the 3-episode window gone, the first cycle after a
+  # season is requested queues every missing episode of that season into ONE
+  # EpisodeSearch, and Sonarr fans each of those out across all 36 enabled
+  # indexers. The cap spreads the same work over successive 20-minute cycles
+  # instead; nothing is dropped, because whatever is not searched now has no
+  # cooldown mark written and is picked up again next run.
+  # Re-check at fire time, not at queue time. The walk above takes minutes, and
+  # a season pack that imports partway through gives an episode a file AFTER it
+  # was queued here as "monitored but missing". Searching it anyway is what
+  # grabbed the duplicate WEBDL singles on 2026-07-27 (see 1b2) -- they were
+  # legitimate at search time and unimportable by the time they finished.
+  # Only a positive hasFile=true drops an id; an API error or an empty answer
+  # leaves the batch exactly as it was, so this can never suppress a real search.
+  RECHECKED=""
+  for e in $SEARCH_BATCH; do
+    if [ "$(sonarr "/api/v3/episode/$e" | jq_c -r '.hasFile // empty' 2>/dev/null)" = "true" ]; then
+      log "SEARCH DROPPED  episodeId=$e (a file arrived during this run - a season pack importing, most likely)"
+      continue
+    fi
+    RECHECKED="$RECHECKED $e"
+  done
+  SEARCH_BATCH="$RECHECKED"
+fi
+if [ -n "$(printf '%s' "$SEARCH_BATCH" | tr -d ' ')" ]; then
+  QUEUED_TOTAL=$(printf '%s' "$SEARCH_BATCH" | tr ' ' '\n' | grep -c . )
+  if [ "$MAX_SEARCH_BATCH" -gt 0 ] && [ "$QUEUED_TOTAL" -gt "$MAX_SEARCH_BATCH" ]; then
+    log "SEARCH CAPPED  $QUEUED_TOTAL episodes queued; searching $MAX_SEARCH_BATCH this cycle, remainder next run (RW_MAX_SEARCH_BATCH)"
+    SEARCH_BATCH=$(printf '%s' "$SEARCH_BATCH" | tr ' ' '\n' | grep -v '^$' \
+                   | head -n "$MAX_SEARCH_BATCH" | paste -sd' ' -)
+  fi
   IDS=$(printf '%s' "$SEARCH_BATCH" | tr ' ' '\n' | grep -v '^$' | paste -sd, -)
   SEARCH_COUNT=$(printf '%s' "$IDS" | tr ',' '\n' | grep -c . )
   if [ "$DRY_RUN" = "true" ]; then
@@ -1007,7 +1203,7 @@ if [ "$TOTAL_STUCK" -gt 0 ]; then
 fi
 
 log "Watch ledger: added $LEDGER_ADDED new confirmations this run"
-log "SUMMARY  window=$TOTAL_KEEP  unmonitored=$TOTAL_UNMON  dormant=$TOTAL_DORMANT  deleted=$TOTAL_DEL  cancelled-downloads=$TOTAL_CANCEL  pack-safe-skips=$TOTAL_PACKSAFE  dub-kept=$TOTAL_DUBKEEP  dub-grabbed=$TOTAL_DUBGRAB  dropped-files=$TOTAL_DROP  searched=$SEARCH_COUNT  STUCK=$TOTAL_STUCK  skipped-ambiguous=$SKIPPED"
+log "SUMMARY  window=$TOTAL_KEEP  unmonitored=$TOTAL_UNMON  dormant=$TOTAL_DORMANT  deleted=$TOTAL_DEL  cancelled-downloads=$TOTAL_CANCEL  pack-safe-skips=$TOTAL_PACKSAFE  dub-kept=$TOTAL_DUBKEEP  dub-grabbed=$TOTAL_DUBGRAB  dropped-files=$TOTAL_DROP  unimportable-cleared=$TOTAL_UNIMPORTABLE  searched=$SEARCH_COUNT  STUCK=$TOTAL_STUCK  skipped-ambiguous=$SKIPPED"
 if [ "$DRY_RUN" = "true" ]; then
   log "DRY_RUN=true — nothing was changed or deleted. Report only."
 else
