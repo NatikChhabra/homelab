@@ -1,5 +1,5 @@
 #!/bin/bash
-# Staged by update-audit.sh on 2026-08-06T23:00:02Z.
+# Staged by update-audit.sh on 2026-08-09T23:00:03Z.
 # Run from an INTERACTIVE shell — docker pull needs the credential helper,
 # which fails under Task Scheduler on this host.
 # Only PATCH and MINOR updates are listed. MAJOR / RENAMED are excluded

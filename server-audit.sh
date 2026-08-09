@@ -646,7 +646,7 @@ sec "15. Non-media stacks"
 # explicit container_name on 2026-07-28, which renamed the container. This list
 # still held the old compose-generated name, so the very next audit would have
 # reported "container server-room-glances-1 is 'missing'" while Glances was
-# running perfectly. Section 18 now cross-checks this list against the
+# running perfectly. Section 19 now cross-checks this list against the
 # container_name lines in Stacks/ so a rename cannot desynchronise it silently
 # again.
 OTHER_CONTAINERS="adguardhome immich-immich-server-1 immich-database-1 immich-redis-1 \
@@ -687,7 +687,282 @@ case " 200 302 307 " in
 esac
 
 # ---------------------------------------------------------------------------
-sec "16. DNS filtering actually resolves"
+sec "16. JARVIS voice assistant"
+# Six containers in a dependency chain, and every one of them has a failure mode
+# that "the container is running" cannot see. A Wyoming service accepts TCP
+# connections minutes before its model has finished downloading. Ollama answers
+# HTTP 200 with an empty model list. Home Assistant answers 401 to an
+# authenticated probe forever while serving perfectly. So nothing in this
+# section is satisfied by container state -- every check makes the thing answer.
+# Incident 2026-08-09: jarvis-kokoro and jarvis-capabilities were both running in
+# production and NEITHER was in this list, so the "unlisted container" check at
+# the end of the audit flagged them as failing invisibly. Kokoro is now THE voice
+# -- if it dies, JARVIS silently falls back to the Piper voice Natik rejected,
+# which sounds like a quality regression rather than an outage. Adding a service
+# without adding it here is the exact hole this audit exists to close.
+JARVIS_CONTAINERS="jarvis-ollama jarvis-hass jarvis-whisper jarvis-piper jarvis-wake-word jarvis-voice jarvis-kokoro jarvis-capabilities"
+for c in $JARVIS_CONTAINERS; do
+  st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
+  if [ "$st" != "running" ]; then
+    fail "container $c is '${st:-missing}', expected running"
+  else
+    rc=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null)
+    hs=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$c" 2>/dev/null)
+    if [ "${rc:-0}" -gt 3 ]; then
+      warn "container $c has restarted $rc times (crash loop?)"
+    elif [ "$hs" = "unhealthy" ]; then
+      # WARN here, not FAIL, and deliberately unlike sections 1 and 15.
+      # Incident 2026-08-08: jarvis-hass reported unhealthy across 56
+      # consecutive probes while Home Assistant was serving normally, because
+      # the healthcheck curled an authenticated endpoint that answers 401 by
+      # design -- and every probe was additionally logged as a failed login,
+      # which walks HA towards banning its own healthcheck. That cost a day.
+      # The response probes below are the authority for this stack; a
+      # healthcheck that disagrees with them is a bug in the healthcheck.
+      warn "container $c reports unhealthy - check it against the response probes below before believing it"
+    else
+      ok "container $c running (restarts=$rc)"
+    fi
+  fi
+done
+
+# Incident 2026-08-08: openwakeword_data did not exist and had to be created by
+# hand. All five volumes are declared `external: true`, so compose will never
+# create one for you -- it aborts the entire stack with an error that names the
+# volume but not the fix, and the other five services never start either.
+for v in ollama_data hass_config whisper_data tts_data openwakeword_data; do
+  if docker volume inspect "$v" >/dev/null 2>&1; then
+    ok "external volume $v exists"
+  else
+    fail "external volume $v is MISSING - 'docker compose up -d' in jarvis/ will refuse to start the whole stack; create it with 'docker volume create $v'"
+  fi
+done
+
+# Wyoming is a raw TCP JSONL protocol, NOT HTTP. `curl http://localhost:10300/`
+# ALWAYS fails against it, and that failure is NOT evidence of a fault -- the
+# since-deleted api.py health endpoint did exactly that and reported all three
+# voice services as down while every one of them was fine. So this speaks the
+# real protocol: open the socket, send a `describe`, read the `info` reply.
+#
+# It counts INSTALLED MODELS rather than stopping at the handshake. These images
+# fetch their models from HuggingFace on first run, so a container listens on
+# its port for several minutes before it can actually transcribe or speak. A
+# plain port check -- which is exactly what the compose healthchecks do -- is
+# green through that entire window and green forever if the download failed.
+#
+# The probe runs inside jarvis-voice because that container already carries
+# wyoming_client.py, a Python to run it, and a route onto the jarvis network.
+# The reply is parsed IN the container on purpose: piper's `describe` is ~83KB
+# of voice metadata, and section 12 already recorded what happens when a large
+# API payload is dragged out through a shell variable.
+JARVIS_WY=$(docker exec jarvis-voice python -c '
+import asyncio, sys
+sys.path.insert(0, "/app")
+import wyoming_client as w
+
+TARGETS = [("piper", "jarvis-piper", 10200, "tts"),
+           ("whisper", "jarvis-whisper", 10300, "asr"),
+           ("openwakeword", "jarvis-wake-word", 10400, "wake")]
+
+async def main():
+    for label, host, port, kind in TARGETS:
+        try:
+            info = await w.describe(host, port, timeout=10)
+        except Exception as exc:
+            print("%s|error|0|no|%s" % (label, type(exc).__name__))
+            continue
+        if not info:
+            print("%s|no-reply|0|no|" % label)
+            continue
+        programs = info.get(kind) or []
+        installed = 0
+        wake = "no"
+        for prog in programs:
+            models = list(prog.get("models") or []) + list(prog.get("voices") or [])
+            for m in models:
+                if not m.get("installed"):
+                    continue
+                installed += 1
+                if m.get("name") == "hey_jarvis":
+                    wake = "yes"
+        names = ",".join(p.get("name", "?") for p in programs) or "-"
+        print("%s|%s|%d|%s|" % (label, names, installed, wake))
+
+asyncio.run(main())
+' 2>/dev/null | tr -d '\r')
+
+if [ -z "$JARVIS_WY" ]; then
+  fail "the Wyoming probe could not run inside jarvis-voice - piper/whisper/openwakeword are UNVERIFIED, which is not the same as healthy"
+else
+  # Read from a file, not a pipe. Section 8 records why: a `while read` on the
+  # right of a pipe runs in a subshell, so both the counters and the report
+  # buffer built inside it are silently discarded.
+  WYF=$(mktemp)
+  printf '%s\n' "$JARVIS_WY" > "$WYF"
+  while IFS='|' read -r label programs installed wake err; do
+    [ -z "${label:-}" ] && continue
+    case "$programs" in
+      error)
+        fail "$label did not answer a Wyoming describe (${err:-connection failed}) - the port is published but nothing is serving the protocol behind it" ;;
+      no-reply)
+        fail "$label accepted the connection but never sent an 'info' reply - up, listening, and not serving" ;;
+      *)
+        if [ "${installed:-0}" -lt 1 ]; then
+          fail "$label answers describe as '$programs' but has 0 INSTALLED models - the model download never finished, so it will accept audio and return nothing"
+        else
+          ok "$label answers Wyoming describe ($programs, $installed model(s) installed)"
+        fi ;;
+    esac
+    # The entire stack is built around one phrase. openWakeWord ships several
+    # pretrained wake models and only preloads whichever `--preload-model`
+    # names, so a typo in that one compose argument leaves the service
+    # completely healthy -- connected, answering describe, listening hard for
+    # "okay nabu" -- and stone deaf to its own name, with nothing anywhere
+    # reporting a fault. Assert the model by name rather than trusting the flag.
+    if [ "$label" = "openwakeword" ]; then
+      if [ "$wake" = "yes" ]; then
+        ok "openwakeword has the hey_jarvis model installed"
+      else
+        fail "openwakeword does NOT list hey_jarvis - the wake word is missing, so nothing will ever trigger; check --preload-model in jarvis/docker-compose.yml"
+      fi
+    fi
+  done < "$WYF"
+  rm -f "$WYF"
+fi
+
+# Incident 2026-08-08: the compose healthcheck curled http://localhost:8123/api/,
+# which REQUIRES a bearer token, so it returned 401 on every probe. The container
+# sat "unhealthy" through 56 consecutive probes while Home Assistant was serving
+# perfectly, and each probe was recorded as a failed login (http.ban warnings).
+# /manifest.json needs no credential at all, so a non-200 here is a genuine
+# outage rather than a missing token -- which is the whole point of probing it.
+hacode=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "http://localhost:8123/manifest.json" 2>/dev/null)
+case "$hacode" in
+  200) ok "Home Assistant answers UNAUTHENTICATED on :8123 (/manifest.json 200)" ;;
+  *)   fail "Home Assistant /manifest.json returned '$hacode', expected 200 - this endpoint needs no token, so this is a real outage and not an auth problem" ;;
+esac
+
+# A long-lived access token can be revoked from the Home Assistant UI at any
+# moment, and nothing else on this box would notice. Every voice command goes
+# through POST /api/conversation/process carrying this token: if it stops
+# authenticating, the microphone still records, the transcript still appears on
+# screen, and every command silently does nothing. Note that jarvis-voice's own
+# /api/status reports `hass_token_configured` for a token that is PRESENT, not
+# one that WORKS -- so it cannot catch this and this check is not redundant.
+if [ -n "${JARVIS_HASS_TOKEN:-}" ]; then
+  tcode=$(curl -s -o /dev/null -w '%{http_code}' -m 15 \
+          -H "Authorization: Bearer $JARVIS_HASS_TOKEN" "http://localhost:8123/api/" 2>/dev/null)
+  case "$tcode" in
+    200)     ok "JARVIS_HASS_TOKEN still authenticates against Home Assistant (/api/ 200)" ;;
+    401|403) fail "JARVIS_HASS_TOKEN is REVOKED or wrong (HTTP $tcode) - speech will transcribe fine and then do nothing at all; mint a new long-lived token in HA and update secrets.env" ;;
+    *)       fail "Home Assistant /api/ returned '$tcode' with the stored token, expected 200" ;;
+  esac
+else
+  fail "JARVIS_HASS_TOKEN is not set in $SECRETS_FILE - the voice bridge cannot execute a single command"
+fi
+
+# Two distinct failures, one endpoint. /api/tags answering proves the daemon is
+# up and says nothing about whether a model is there. ollama_data is an external
+# volume, so a volume recreated empty leaves Ollama cheerfully answering 200
+# with {"models":[]} while every conversation dies at the model-load step.
+OLL=$(curl -s -m 20 "http://localhost:11434/api/tags" 2>/dev/null)
+nmodels=$(printf '%s' "$OLL" | jqs -r '.models | length')
+case "${nmodels:-}" in
+  ''|*[!0-9]*) fail "Ollama /api/tags unreadable on :11434 - the conversation agent has no backend at all" ;;
+  0)           fail "Ollama answers but holds ZERO models - ollama_data was recreated empty; re-pull with 'docker exec jarvis-ollama ollama pull <model>'" ;;
+  *)           ok "Ollama answers /api/tags with $nmodels model(s)" ;;
+esac
+
+# ...and the model Home Assistant is actually CONFIGURED to use has to be one of
+# them. Read out of HA rather than hardcoded here: model selection for this
+# stack is still open, so a name pinned into this script would go stale and
+# start failing a perfectly healthy server. The failure this catches is the
+# mirror image of the one above -- a conversation agent pointing at a model that
+# was deleted, renamed or never pulled, which surfaces only as every single
+# spoken command erroring out with nothing else looking wrong.
+WANTED_MODEL=$(docker exec jarvis-hass python3 -c '
+import json
+try:
+    entries = json.load(open("/config/.storage/core.config_entries"))["data"]["entries"]
+except Exception:
+    raise SystemExit
+for entry in entries:
+    if entry.get("domain") != "ollama":
+        continue
+    for sub in entry.get("subentries") or []:
+        model = (sub.get("data") or {}).get("model")
+        if model:
+            print(model)
+            raise SystemExit
+' 2>/dev/null | tr -d '\r' | head -1)
+if [ -z "$WANTED_MODEL" ]; then
+  warn "no Ollama conversation agent is configured in Home Assistant - speech will transcribe but nothing will answer it"
+elif [ "${nmodels:-0}" -gt 0 ]; then
+  havem=$(printf '%s' "$OLL" | jqs -r --arg m "$WANTED_MODEL" '[.models[]?|select(.name==$m)]|length')
+  if [ "${havem:-0}" -gt 0 ]; then
+    ok "HA conversation agent model '$WANTED_MODEL' is present in Ollama"
+  else
+    fail "HA conversation agent is configured for model '$WANTED_MODEL' but Ollama does not have it - every voice command will error"
+  fi
+fi
+
+# The bridge's own view of its dependencies, which is the view the browser gets.
+# Checked IN ADDITION to the direct probes above, never instead of them: an
+# earlier version of this very endpoint reported all three voice services down
+# because it spoke HTTP at raw-TCP Wyoming ports. This endpoint agreeing with
+# the independent probes is itself part of the signal; if they ever disagree,
+# the direct probes win.
+VST=$(curl -s -m 25 "http://localhost:3100/api/status" 2>/dev/null)
+if printf '%s' "$VST" | grep -q '"whisper"'; then
+  vbad=$(printf '%s' "$VST" | jqs -r '[ to_entries[] | select(.value|type=="string") | select(.value != "ok") | "\(.key)=\(.value)" ] | join(" ")')
+  vtok=$(printf '%s' "$VST" | jqs -r '.hass_token_configured')
+  if [ -n "$vbad" ]; then
+    fail "jarvis-voice /api/status does not report every service ok: $vbad"
+  else
+    ok "jarvis-voice /api/status reports every service ok"
+  fi
+  if [ "$vtok" != "true" ]; then
+    fail "jarvis-voice has no HA token in its environment - it can hear you and cannot act; check env_file in jarvis/docker-compose.yml"
+  fi
+else
+  fail "jarvis-voice /api/status did not answer on :3100 - the browser client has no backend"
+fi
+
+# Incident 2026-08-08: the browser client requires a SECURE CONTEXT. Served over
+# plain HTTP on a tailnet IP, `navigator.mediaDevices` is undefined, so the
+# microphone dies with a bare TypeError and the page simply looks broken -- no
+# log anywhere names the real cause. `tailscale serve` on 8443 is what supplies
+# the HTTPS, so losing that one mapping silently kills voice input while all six
+# containers stay green and every check above still passes.
+#
+# Port 443 is asserted in the same breath because it is the neighbouring
+# mistake: `tailscale serve` run without an explicit port targets 443 and
+# REPLACES the handler there rather than adding to it, so a careless re-run
+# would take Vaultwarden off the tailnet. JARVIS is on 8443 specifically to
+# avoid that, and this is what proves it stayed that way.
+TS_EXE="/c/Program Files/Tailscale/tailscale.exe"
+if [ -x "$TS_EXE" ]; then
+  TSJ=$("$TS_EXE" serve status --json 2>/dev/null)
+  ts_port() { printf '%s' "$TSJ" | jqs -r --arg p "$1" \
+    '.Web // {} | to_entries[] | select((.key|split(":")|last) == $p) | .value.Handlers["/"].Proxy // empty'; }
+  j8443=$(ts_port 8443)
+  j443=$(ts_port 443)
+  case "$j8443" in
+    *:3100) ok "tailscale serve maps 8443 -> $j8443 (HTTPS, so getUserMedia works)" ;;
+    "")     fail "tailscale serve has NO mapping on 8443 - the JARVIS UI is not served over HTTPS, so navigator.mediaDevices is undefined and the microphone cannot start" ;;
+    *)      fail "tailscale serve 8443 points at '$j8443', expected localhost:3100 - the JARVIS UI is not behind that HTTPS mapping any more" ;;
+  esac
+  case "$j443" in
+    *:8222) ok "tailscale serve still maps 443 -> $j443 (vaultwarden undisturbed)" ;;
+    "")     fail "tailscale serve has NO mapping on 443 - Vaultwarden is off the tailnet" ;;
+    *)      fail "tailscale serve 443 points at '$j443', expected 127.0.0.1:8222 - something displaced Vaultwarden's mapping" ;;
+  esac
+else
+  warn "cannot run $TS_EXE - the JARVIS HTTPS mapping is unverified, so the microphone may be broken without any other symptom"
+fi
+
+# ---------------------------------------------------------------------------
+sec "17. DNS filtering actually resolves"
 # Incident 2026-07-28 (same outage): "the container is running" was never the
 # real question. Port 53 has to ANSWER. A container that is up but not serving
 # DNS breaks every device pointed at it just as hard as a missing one, so this
@@ -721,7 +996,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-sec "17. Immich library integrity"
+sec "18. Immich library integrity"
 # Incident 2026-07-28: downloading any photo from Immich failed with
 # "ENOENT: no such file or directory, access '/data/library/admin/...'".
 # 105 of 812 active assets had thumbnails, previews and EXIF rows -- so the
@@ -741,7 +1016,7 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
     docker exec "$IM_DB" psql -U "$im_user" -d immich -t -A \
       -c 'SELECT "originalPath" FROM asset WHERE "deletedAt" IS NULL;' 2>/dev/null \
       | tr -d '\r' > /tmp/_immich_paths.txt
-    im_total=$(grep -c . /tmp/_immich_paths.txt 2>/dev/null || echo 0)
+    im_total=$(awk 'NF {n++} END {print n+0}' /tmp/_immich_paths.txt 2>/dev/null)
     if [ "${im_total:-0}" -gt 0 ]; then
       docker cp /tmp/_immich_paths.txt "$IM_SRV:/tmp/_audit_paths.txt" >/dev/null 2>&1
       # Emit the PATHS, not just a count. Verified 2026-07-28 against
@@ -768,7 +1043,7 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
         done < /tmp/_audit_paths.txt' 2>/dev/null | tr -d '\r' | sort > /tmp/_immich_missing.txt
       docker exec "$IM_SRV" rm -f /tmp/_audit_paths.txt >/dev/null 2>&1
       rm -f /tmp/_immich_paths.txt
-      im_missing=$(grep -c . /tmp/_immich_missing.txt 2>/dev/null || echo 0)
+      im_missing=$(awk 'NF {n++} END {print n+0}' /tmp/_immich_missing.txt 2>/dev/null)
       IM_BASELINE="${IM_BASELINE:-/c/ServerData/Stacks/immich-lost-baseline.txt}"
       if [ "${im_missing:-0}" -eq 0 ]; then
         ok "Immich: all ${im_total} active assets have their original file"
@@ -788,7 +1063,13 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
         comm -23 /tmp/_immich_missing.txt \
              <(tr -d '\r' < "$IM_BASELINE" | grep -v '^#' | grep . | sort) \
              > /tmp/_immich_new.txt
-        im_new=$(grep -c . /tmp/_immich_new.txt 2>/dev/null || echo 0)
+        # Counted with awk, not `grep -c . || echo 0`. grep -c exits 1 on zero
+        # matches, so under `set -o pipefail` the fallback fired IN ADDITION to
+        # grep's own "0" and left this variable holding two lines ("0\n0"). The
+        # numeric test below then aborted with "integer expected" -- printing a
+        # raw bash error into the audit report and falling through to the else
+        # branch. Same trap, and same fix, as the stuck-episodes count above.
+        im_new=$(awk 'NF {n++} END {print n+0}' /tmp/_immich_new.txt 2>/dev/null)
         if [ "${im_new:-0}" -gt 0 ]; then
           fail "Immich: ${im_new} NEWLY missing original(s) beyond the ${im_missing} known lost -- this is a fresh loss, and a backup may still hold them. First: $(head -1 /tmp/_immich_new.txt)"
         else
@@ -805,7 +1086,7 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
 fi
 
 # ---------------------------------------------------------------------------
-sec "18. Docker daemon hygiene"
+sec "19. Docker daemon hygiene"
 # Incident 2026-07-28: every container was running with the json-file log driver
 # and NO size limit ("json-file map[]"). Container logs grow without bound, and
 # they live on the Docker Desktop VM disk, so a single chatty container filling
@@ -907,7 +1188,7 @@ fi
 
 unchecked=""
 for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
-  case " $EXPECTED $OTHER_CONTAINERS " in
+  case " $EXPECTED $OTHER_CONTAINERS $JARVIS_CONTAINERS " in
     *" $c "*) ;;
     *) unchecked="$unchecked $c" ;;
   esac
@@ -935,6 +1216,543 @@ if command -v docker-credential-desktop.exe >/dev/null 2>&1; then
   fi
 fi
 
+
+# ---------------------------------------------------------------------------
+sec "20. JARVIS intent routing and prompt"
+# Everything in this section exists because it broke on 2026-08-08/09.
+#
+# The stack can be perfectly healthy -- every container up, every Wyoming
+# service answering -- while JARVIS is quietly 80x slower than it should be and
+# confirming actions it never performed. Section 16 checks that the parts are
+# alive. This section checks that the parts are WIRED THE WAY THEY WERE BUILT.
+
+JARVIS_DIR="/c/ServerData/Stacks/jarvis"
+
+# --- the live system prompt vs the repo ------------------------------------
+# Incident 2026-08-08: the repo's jarvis-prompt.txt had the "movie, film,
+# gaming -> Movie time." line removed because script.movie_time is deliberately
+# NOT exposed to the model (exposing it would push the tool count to 18 and
+# break the tested budget). The LIVE prompt, which lives in the config entry's
+# options and not on disk, still had it. So the model kept saying "Movie time
+# activated." while script.movie_time.last_triggered stayed None -- a spoken
+# confirmation for an action that never happened, which is undetectable by the
+# person listening. The two copies drift silently and nothing else notices.
+if [ -r "$JARVIS_DIR/jarvis-prompt.txt" ]; then
+  LIVE_PROMPT=$(docker exec jarvis-hass python3 -c '
+import json
+try:
+    d = json.load(open("/config/.storage/core.config_entries", encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+for e in d["data"]["entries"]:
+    if e.get("domain") != "ollama":
+        continue
+    for s in e.get("subentries", []):
+        if s.get("subentry_type") == "conversation":
+            print((s.get("data", {}).get("prompt") or "").strip())
+            raise SystemExit(0)
+' 2>/dev/null)
+  REPO_PROMPT=$(tr -d '\r' < "$JARVIS_DIR/jarvis-prompt.txt" | sed -e 's/[[:space:]]*$//')
+  LIVE_NORM=$(printf '%s' "$LIVE_PROMPT" | sed -e 's/[[:space:]]*$//')
+  if [ -z "$LIVE_NORM" ]; then
+    warn "could not read the live JARVIS system prompt from jarvis-hass - drift against the repo is UNVERIFIED"
+  elif [ "$(printf '%s' "$LIVE_NORM" | md5sum)" = "$(printf '%s' "$REPO_PROMPT" | md5sum)" ]; then
+    ok "live JARVIS system prompt matches jarvis-prompt.txt"
+  else
+    fail "live JARVIS system prompt DIFFERS from jarvis-prompt.txt - the model is being told something the repo does not say; redeploy with 'docker exec jarvis-hass python3 /tmp/patch_prompt_offline.py --apply' (HA must be stopped) and see jarvis/deploy_prompt.py"
+  fi
+
+  # The specific line that caused the phantom action. Checked by name because
+  # a future edit could reintroduce it without changing anything else.
+  if printf '%s' "$LIVE_NORM" | grep -qi "movie time"; then
+    fail "the live prompt still references 'Movie time' - script.movie_time is NOT exposed to the model, so it will narrate the action instead of performing it"
+  else
+    ok "live prompt does not reference the unexposed Movie time script"
+  fi
+else
+  warn "$JARVIS_DIR/jarvis-prompt.txt is missing - cannot check live prompt drift"
+fi
+
+# --- local-first routing ----------------------------------------------------
+# Measured 2026-08-09: 12 of 15 non-actuating benchmark utterances resolve
+# through HA's built-in parser at a median 18.3 ms, against 1472 ms through
+# qwen2.5:3b. The failure mode is NOT an error -- if the custom sentences fail
+# to load or the router is disabled, everything still works, just ~80x slower
+# and burning GPU on every "lights on". Nothing user-visible reports that, so
+# the router's own counters are the only signal.
+ROUTER_JSON=$(curl -s -m 10 "http://localhost:3100/api/status" 2>/dev/null)
+if [ -z "$ROUTER_JSON" ]; then
+  warn "jarvis-voice /api/status did not answer - intent routing is UNVERIFIED"
+else
+  if printf '%s' "$ROUTER_JSON" | grep -q '"router"'; then
+    ok "jarvis-voice exposes router statistics"
+    R_LOCAL=$(printf '%s' "$ROUTER_JSON" | sed -n 's/.*"local_hits":[[:space:]]*\([0-9]*\).*/\1/p')
+    R_LLM=$(printf '%s' "$ROUTER_JSON" | sed -n 's/.*"llm_hits":[[:space:]]*\([0-9]*\).*/\1/p')
+    R_TOTAL=$(( ${R_LOCAL:-0} + ${R_LLM:-0} ))
+    # Only meaningful once real commands have gone through; a freshly restarted
+    # container legitimately reports 0/0 and that is not a fault.
+    if [ "$R_TOTAL" -ge 20 ]; then
+      R_SHARE=$(( ${R_LOCAL:-0} * 100 / R_TOTAL ))
+      if [ "$R_SHARE" -lt 40 ]; then
+        warn "only ${R_SHARE}% of the last $R_TOTAL commands were handled locally (expected ~80%) - custom sentences may have failed to load; check /config/custom_sentences/en/jarvis.yaml"
+      else
+        ok "local-first routing is handling ${R_SHARE}% of commands without the model"
+      fi
+    else
+      ok "router counters present ($R_TOTAL commands since restart, too few to judge the split)"
+    fi
+  else
+    fail "jarvis-voice /api/status has no router block - voice_server.py is running a build WITHOUT the local-first router, so every command pays full model latency"
+  fi
+fi
+
+# --- the custom sentences that make local routing possible ------------------
+# tuya-local wipes its devices/ directory on upgrade and this file lives in the
+# same class of "config HA owns that an upgrade can drop". If it vanishes,
+# argument extraction and the whole comfort table silently fall back to the LLM.
+if MSYS_NO_PATHCONV=1 docker exec jarvis-hass test -f /config/custom_sentences/en/jarvis.yaml 2>/dev/null; then
+  SENT_COUNT=$(MSYS_NO_PATHCONV=1 docker exec jarvis-hass sh -c "grep -c '^  Jarvis' /config/custom_sentences/en/jarvis.yaml" 2>/dev/null | tr -d '\r')
+  if [ "${SENT_COUNT:-0}" -ge 15 ]; then
+    ok "custom sentences installed ($SENT_COUNT JARVIS intents)"
+  else
+    warn "custom_sentences/en/jarvis.yaml has only ${SENT_COUNT:-0} JARVIS intents - expected at least 15; local routing coverage will be reduced"
+  fi
+else
+  fail "/config/custom_sentences/en/jarvis.yaml is MISSING - argument extraction ('set the AC to 22') and the comfort table all fall back to the model at ~1.5s each"
+fi
+
+if MSYS_NO_PATHCONV=1 docker exec jarvis-hass test -f /config/packages/jarvis_intents.yaml 2>/dev/null; then
+  ok "intent_script handlers installed"
+else
+  fail "/config/packages/jarvis_intents.yaml is MISSING - the custom sentences will match and then do NOTHING, which is worse than not matching"
+fi
+
+# --- entity aliases ---------------------------------------------------------
+# Incident 2026-08-09: the lights are registered as "Gang 1/2/3". Nobody says
+# that out loud, so every natural light command missed the local parser and
+# went to the model. Aliases live in the entity registry, which HA rewrites on
+# shutdown, so they are exactly the kind of thing that can vanish.
+# NOTE the key. As of entity-registry minor_version 23 the aliases live under
+# "aliases_v2"; the old "aliases" key is still present on every record but is now
+# permanently EMPTY. Reading only "aliases" reports zero for a registry that is
+# perfectly populated -- that briefly looked like the aliases had been lost in a
+# restart. Read both so this survives the migration in either direction.
+ALIAS_N=$(MSYS_NO_PATHCONV=1 docker exec jarvis-hass python3 -c '
+import json
+try:
+    d = json.load(open("/config/.storage/core.entity_registry", encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+n = 0
+for e in d["data"]["entities"]:
+    if e.get("entity_id", "").startswith(("light.node_switch_gang", "fan.fan")):
+        n += len(e.get("aliases_v2") or e.get("aliases") or [])
+print(n)
+' 2>/dev/null | tr -d '\r')
+if [ "${ALIAS_N:-0}" -ge 10 ]; then
+  ok "voice aliases present on the lights and fan ($ALIAS_N total)"
+else
+  warn "only ${ALIAS_N:-0} voice aliases on the lights/fan - natural phrasings like 'turn on light one' will miss the local parser and cost ~1.5s each; re-run 'docker exec jarvis-voice python /app/ha_aliases.py --apply'"
+fi
+
+# --- closed-loop verification actually loaded -------------------------------
+# Incident 2026-08-09: the running jarvis-voice image had NO verify/ directory.
+# The server logged "replies will NOT be checked against Home Assistant" once at
+# startup and then spoke unverified confirmations for hours. The repo looked
+# complete the whole time -- the file existed in git and not in the image.
+if docker logs jarvis-voice 2>&1 | tail -200 | grep -q "closed-loop verification enabled"; then
+  ok "closed-loop reply verification is enabled"
+elif docker logs jarvis-voice 2>&1 | tail -200 | grep -qi "could not be imported"; then
+  fail "jarvis-voice could NOT import verify/closed_loop.py - replies are spoken WITHOUT being checked against Home Assistant, so the model can confirm actions it never took"
+else
+  warn "cannot tell from jarvis-voice logs whether closed-loop verification is enabled"
+fi
+
+
+# ---------------------------------------------------------------------------
+sec "21. Host stays awake"
+# Incident 2026-08-09: the host entered Modern Standby at 00:24:41 and did not
+# leave until 07:34:52 -- 7 h 10 m with every container unreachable. This box
+# reports "Standby (S0 Low Power Idle) NETWORK DISCONNECTED", so during standby
+# the laptop still looks powered on, fans and all, while the network stack is
+# down. Natik reported it as "the whole server turns off".
+#
+# It also silently ate the night jobs: Daily Backup, Update Audit and Weekly
+# Audit all reported "terminated" for runs scheduled inside that window. Those
+# looked like three unrelated task bugs and were not -- they were this.
+#
+# The non-obvious part, and the reason this check tests the ASSERTION and not
+# just the timeouts: when that outage happened every sleep timeout was ALREADY
+# 0/never. Idle timeout was never the trigger. Lid close (LIDACTION=1) and
+# direct SetSuspendState calls bypass the timeout entirely, and the vendor power
+# app rewrites scheme values when it switches between its four profiles
+# (Silent/Performance/Turbo/Balanced), quietly undoing powercfg. So a green
+# "timeouts are 0" reading proves nothing on its own.
+if command -v powercfg.exe >/dev/null 2>&1; then
+
+  # 1. Timeouts and lid action, on EVERY scheme -- the vendor app can switch
+  #    profiles at any time, so a setting fixed on only the active one is a
+  #    setting that comes back.
+  _sleepbad=""
+  for _g in $(powercfg.exe -L 2>/dev/null | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'); do
+    _nm=$(powercfg.exe -L 2>/dev/null | grep "$_g" | sed -E 's/.*\((.*)\).*/\1/' | tr -d '\r')
+    for _pair in "SUB_SLEEP STANDBYIDLE sleep" "SUB_VIDEO VIDEOIDLE display-off" "SUB_BUTTONS LIDACTION lid-close"; do
+      set -- $_pair
+      _v=$(powercfg.exe -q "$_g" "$1" "$2" 2>/dev/null | grep -i 'Current AC Power Setting Index' | grep -oE '0x[0-9a-f]+' | head -1)
+      [ -z "$_v" ] && continue
+      if [ "$((_v))" -ne 0 ] 2>/dev/null; then
+        _sleepbad="${_sleepbad}${_nm}/$3=$((_v)) "
+      fi
+    done
+  done
+  if [ -n "$_sleepbad" ]; then
+    fail "host can sleep or blank its display: $_sleepbad-- set these to 0 on ALL schemes (see keep-awake.ps1 header)"
+  else
+    ok "sleep, display-off and lid-close are 0 (never) on every power scheme"
+  fi
+
+  # 2. The execution-state assertion. This is the load-bearing check: it is the
+  #    only thing here that survives the vendor app rewriting a scheme.
+  #    keep-awake.ps1 must appear in BOTH the DISPLAY and SYSTEM request lists.
+  #    Checking "is the process running" is not equivalent -- the first version
+  #    of that script ran happily for minutes while asserting nothing at all,
+  #    because PowerShell 5.1 parses 0x80000000 as a negative Int32 and the
+  #    [uint32] cast threw, leaving the flag $null and silently downgrading
+  #    ES_CONTINUOUS to a one-shot nudge. Only the requests table caught it.
+  # `-requests`, not `/requests`: Git Bash's MSYS path conversion rewrites the
+  # slash form into a Windows path and powercfg answers "Invalid Parameters",
+  # which this check would then read as "no assertion held" and FAIL on a
+  # perfectly healthy host. powercfg accepts either prefix.
+  _req=$(powercfg.exe -requests 2>/dev/null | tr -d '\r')
+  _disp=$(printf '%s' "$_req" | awk '/^DISPLAY:/{f=1;next}/^[A-Z]+:/{f=0}f' | grep -ci 'powershell.exe')
+  _sys=$(printf  '%s' "$_req" | awk '/^SYSTEM:/{f=1;next}/^[A-Z]+:/{f=0}f'  | grep -ci 'powershell.exe')
+  if [ "${_disp:-0}" -ge 1 ] && [ "${_sys:-0}" -ge 1 ]; then
+    ok "keep-awake assertion is held (powercfg /requests lists DISPLAY + SYSTEM)"
+  elif [ "${_sys:-0}" -ge 1 ]; then
+    warn "SYSTEM wake assertion is held but DISPLAY is not - the box stays up but the panel can still blank; check keep-awake.ps1 is passing ES_DISPLAY_REQUIRED"
+  else
+    fail "NO keep-awake assertion held - powercfg /requests shows no powershell.exe under DISPLAY/SYSTEM; the 'JARVIS - Keep Awake' task is dead or asserting nothing (a running process is NOT proof - see this section's comment)"
+  fi
+
+  # 3. Did we actually sleep since the last audit? Direct evidence beats
+  #    inference from config. Kernel-Power 506 = entering Modern Standby.
+  _ent=$(powershell.exe -NoProfile -NonInteractive -Command "try{(Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Power';Id=506;StartTime=(Get-Date).AddDays(-7)} -ErrorAction Stop|Measure-Object).Count}catch{0}" 2>/dev/null | tr -d '\r\n ')
+  case "$_ent" in
+    ''|*[!0-9]*) warn "could not read Kernel-Power 506 events - cannot confirm whether the host slept in the last 7 days" ;;
+    0) ok "no Modern Standby entries in the last 7 days" ;;
+    *) warn "host entered Modern Standby $_ent time(s) in the last 7 days - each one is an outage window with the network down; correlate with any 'terminated' scheduled tasks above" ;;
+  esac
+else
+  warn "powercfg.exe not on PATH - cannot verify the host is prevented from sleeping"
+fi
+
+
+# ---------------------------------------------------------------------------
+sec "22. JARVIS image matches the repo"
+# The single most expensive recurring failure in this project. THREE separate
+# features shipped, were verified working, and then silently reverted:
+#   verify/    - image predated it; jarvis-voice ran with closed-loop checking
+#                OFF and spoke confirmations for actions it never performed
+#   hermes/    - never COPYd, so voice_server.py could not import it and Hermes
+#                stayed a benchmark that never touched production
+#   hud.py     - docker cp'd into the running container; all six /api/hud/
+#                panels worked until the host rebooted 2026-08-09 07:41, then
+#                every one of them returned 404
+#
+# The mechanism every time: an agent writes a file to disk, copies it into the
+# RUNNING container to test, confirms it works, and reports success. It is true
+# -- right up until the container is recreated, at which point the image (which
+# never got the file) wins and the feature vanishes. Nothing in a normal health
+# check catches this, because the container is up and answering.
+#
+# So this compares the REPO against a FRESH container started from the image,
+# not against the running one. Checking the running container would report
+# green in exactly the scenario this exists to catch.
+JDIR="/c/ServerData/Stacks/jarvis"
+if [ -d "$JDIR" ] && docker image inspect jarvis-voice:latest >/dev/null 2>&1; then
+  _drift=""; _missing=""; _checked=0
+  # The file list is DERIVED FROM Dockerfile.ui, never hand-written. That is the
+  # whole point of this block and it was learned the hard way.
+  #
+  # This check originally carried a hardcoded list. On 2026-08-09 hermes/__init__.py
+  # was created one minute AFTER the image was built and only docker cp'd in, so
+  # the image lacked it -- and because the hardcoded list did not name
+  # __init__.py, this check reported GREEN on exactly the failure it exists to
+  # catch. Without that file `import hermes.hermes` raises "'hermes' is not a
+  # package"; router.py catches the error, logs one warning, and silently routes
+  # everything to the 17-tool agent -- reintroducing the tool cliff invisibly.
+  # A hand-maintained list only ever covers the failures you already had.
+  #
+  # A plain glob of *.py is NOT the alternative: this directory also holds ~30
+  # host-side tools (IR capture, Tuya scripts, _probe_*) that must never be in
+  # the image, and flagging them would train everyone to ignore this check.
+  # Dockerfile.ui is the actual contract for what belongs in the image, so it is
+  # the only correct source of truth.
+  _files=""
+  while IFS= read -r _line; do
+    # "COPY a.py b.py ./" -> the files; "COPY hermes/ ./hermes/" -> expand the dir
+    for _tok in $(printf '%s' "$_line" | sed -E 's/^COPY[[:space:]]+//' | sed -E 's/[[:space:]]+\.?\/?[^[:space:]]*\/?$//'); do
+      case "$_tok" in
+        */) _files="$_files $(cd "$JDIR" && find "${_tok%/}" -type f \
+              \( -name '*.py' -o -name '*.js' -o -name '*.html' -o -name '*.css' \) \
+              -not -path '*__pycache__*' 2>/dev/null | tr '\n' ' ')" ;;
+        *)  _files="$_files $_tok" ;;
+      esac
+    done
+  done <<EOF
+$(grep '^COPY' "$JDIR/Dockerfile.ui" 2>/dev/null)
+EOF
+  for f in $_files; do
+    [ -f "$JDIR/$f" ] || continue
+    _checked=$((_checked+1))
+    _r=$(md5sum "$JDIR/$f" 2>/dev/null | cut -d' ' -f1)
+    _i=$(MSYS_NO_PATHCONV=1 docker run --rm --entrypoint sh jarvis-voice:latest -c "md5sum /app/$f 2>/dev/null | cut -d' ' -f1" 2>/dev/null | tr -d '\r\n')
+    if [ -z "$_i" ]; then _missing="${_missing}$f "
+    elif [ "$_r" != "$_i" ]; then _drift="${_drift}$f "; fi
+  done
+  if [ -n "$_missing" ]; then
+    fail "in the repo but NOT in the jarvis-voice image: ${_missing}- these work only until the container is recreated, then they vanish; add them to Dockerfile.ui and rebuild"
+  fi
+  if [ -n "$_drift" ]; then
+    fail "repo and image DIFFER for: ${_drift}- the running container is not what the repo says it is; rebuild with 'docker compose build jarvis-voice'"
+  fi
+  if [ -z "$_missing" ] && [ -z "$_drift" ]; then
+    ok "jarvis-voice image matches the repo for all $_checked server files"
+  fi
+
+  # A file being present is not the same as the server importing it. hud.py was
+  # present in the repo for hours while every panel 404'd.
+  if curl -sf -m 8 "http://localhost:3100/api/hud/vitals" >/dev/null 2>&1; then
+    ok "HUD panel endpoints are live (/api/hud/vitals answers)"
+  else
+    fail "hud.py is in the image but /api/hud/vitals does not answer - the module is present and NOT registered; check hud.register(app) in voice_server.py"
+  fi
+else
+  warn "jarvis dir or jarvis-voice:latest image not found - skipping repo/image drift check"
+fi
+
+
+# ---------------------------------------------------------------------------
+sec "23. PC agent runs in the interactive session"
+# Incident 2026-08-09: port 8099 answered 200 and a previous session recorded
+# "the PC agent is live on 8099". It was not. The responder was the OLD
+# wol-helper.ps1, which serves only /health and /status; pc-agent.ps1 had been
+# written (60 KB, 24 routes) and never deployed. The earlier check read the app
+# allowlist out of the FILE and the health status off the PORT and reported them
+# as one working service.
+#
+# So this checks the SERVICE NAME in the health payload, not the status code.
+# Both scripts answer 200 on /health; only the payload distinguishes them.
+#
+# The session field is equally load-bearing. The old helper ran as
+# LogonType=ServiceAccount, which lands in session 0 -- and session 0 has no
+# desktop. Every window, input, screenshot and app-launch route would fail there
+# while /health still returned a cheerful 200, because serving HTTP does not
+# require a desktop. "interactive": true is the agent's own report of whether it
+# can actually drive the machine.
+_pc=$(curl -s -m 8 "http://localhost:8099/health" 2>/dev/null)
+if [ -z "$_pc" ]; then
+  fail "nothing answers http://localhost:8099/health - the PC agent is down; voice control of the PC, app launching and typing are all dead"
+else
+  _svc=$(printf '%s' "$_pc" | grep -oE '"service"[[:space:]]*:[[:space:]]*"[^"]+"' | cut -d'"' -f4)
+  _int=$(printf '%s' "$_pc" | grep -oE '"interactive"[[:space:]]*:[[:space:]]*(true|false)' | grep -oE '(true|false)')
+  case "$_svc" in
+    jarvis-pc-agent)
+      if [ "$_int" = "true" ]; then
+        ok "PC agent is live on 8099 and interactive (can drive the desktop)"
+      else
+        fail "PC agent is running but interactive=$_int - it is in session 0 with no desktop, so app launch, typing, windows and screenshots will all fail while /health still returns 200; the task must use LogonType=Interactive"
+      fi
+      ;;
+    jarvis-wol-helper)
+      fail "port 8099 is served by the OLD wol-helper, not the PC agent - it has only /health and /status, so every PC control route is absent; enable the 'JARVIS - PC Agent' task and disable 'JARVIS - WOL Helper'"
+      ;;
+    *)
+      warn "8099 answers but reports service='$_svc' - expected jarvis-pc-agent"
+      ;;
+  esac
+
+  # WOL backward compatibility. pc-agent replaced wol-helper on the same port and
+  # deliberately kept /status and /wake; losing them would silently break waking
+  # the main PC, which is a feature Natik asked for specifically.
+  _wolcode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "http://localhost:8099/status" 2>/dev/null)
+  # 401 is a PASS here: the route exists and is refusing an unauthenticated
+  # request, which is the wanted behaviour. 404 would mean the route is gone.
+  case "$_wolcode" in
+    200|401) ok "WOL /status route preserved on 8099 (http $_wolcode)" ;;
+    404)     fail "WOL /status route is GONE from 8099 - waking the main PC is broken" ;;
+    *)       warn "WOL /status on 8099 returned http $_wolcode" ;;
+  esac
+
+  # File routes. Added 2026-08-09; /pc/file/open is the only route in the agent
+  # that runs ShellExecute on a path, so its two allowlists are security
+  # boundaries, not conveniences.
+  _fcode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "http://localhost:8099/pc/folders" 2>/dev/null)
+  case "$_fcode" in
+    401) ok "file routes present on 8099 (/pc/folders answers, auth enforced)" ;;
+    404) fail "/pc/folders is missing from 8099 - the running agent predates the file routes; restart it with host-helper/restart-agent.ps1 (Restart-ScheduledTask alone does NOT reload it - the old process keeps the port and the new one dies unable to bind)" ;;
+    200) warn "/pc/folders answered 200 WITHOUT a token - authentication is not being enforced on the file routes" ;;
+    *)   warn "/pc/folders returned http $_fcode" ;;
+  esac
+
+  # The extension allowlist must never grow an executable type. This is a static
+  # check of the file rather than a live probe, because the failure mode is
+  # someone adding ".lnk" or ".zip" to be helpful, and by the time it is live it
+  # is one voice command from running something.
+  _ff="/c/ServerData/Stacks/jarvis/host-helper/folders.json"
+  if [ -f "$_ff" ]; then
+    _danger=$(grep -oE '"\.(exe|bat|cmd|com|ps1|psm1|vbs|vbe|js|jse|wsf|msi|msp|scr|cpl|hta|reg|lnk|url|inf|jar|py|sh|apk|iso)"' "$_ff" \
+              | grep -v '_extension_comment' | tr -d '"' | tr '\n' ' ')
+    if [ -n "$_danger" ]; then
+      fail "folders.json allows EXECUTABLE extensions: $_danger- /pc/file/open uses ShellExecute, so this is arbitrary code execution by voice; remove them"
+    else
+      ok "folders.json allows no executable extensions"
+    fi
+    # C:\ServerData holds secrets.env and every app database. It must not be an
+    # openable root. Sync/ lives under it and IS allowed, which is intentional
+    # and safe -- hence the anchored match on the root itself.
+    if grep -qE '"path"[[:space:]]*:[[:space:]]*"C:\\\\ServerData\\\\?"' "$_ff"; then
+      fail "folders.json exposes C:\\ServerData as an openable root - that directory holds secrets.env and every application database"
+    else
+      ok "folders.json does not expose the ServerData root"
+    fi
+  else
+    warn "folders.json not found - the PC agent's file routes will refuse every request"
+  fi
+fi
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+sec "24. Every Hermes tool has somewhere to dispatch"
+# THE INCIDENT THIS EXISTS FOR (2026-08-09)
+# hermes.py carried six pc_* tools and a "pc" specialist for a full day, the PC
+# agent on 8099 answered every one of them correctly by curl, and PC control was
+# nevertheless completely dead by voice. executor.py had exactly two dispatch
+# paths -- HA intents and HA scripts -- so `pc_app` was sent to
+# `script.pc_app`, which does not exist. Home Assistant has 14 scripts and not
+# one of them starts with pc_.
+#
+# The way it failed is the reason this check is worth its length. The executor
+# reported exec_failed, Hermes fell through, and the big agent -- which holds no
+# PC tool at all -- answered from its own head: "Opening Spotify, sir", with
+# nothing launched. Nothing in any log said "broken". Every individual component
+# tested green.
+#
+# So this derives the tool list FROM hermes.py and proves each tool has a real
+# target: an HA intent, an HA script that exists, a context tool, or an entry in
+# HTTP_ROUTES backed by a service that answers. A tool with no target is a
+# guaranteed phantom action, so it is a FAIL, not a warning.
+JDIR="/c/ServerData/Stacks/jarvis"
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx jarvis-voice; then
+  # Run INSIDE the container: it is the only place the real tool tables and the
+  # real HTTP_ROUTES live, and reading them with grep from the host would be a
+  # second, drifting copy of the truth. Same principle as deriving the image
+  # file list from Dockerfile.ui rather than hand-listing it.
+  _toolmap=$(docker exec jarvis-voice python -c "
+import hermes.hermes as H, hermes.executor as E
+for t in sorted(H.TOOLS):
+    if t in E.INTENT_TOOLS: kind='intent'
+    elif t in E.CONTEXT_TOOLS: kind='context'
+    elif t in E.HTTP_ROUTES: kind='http:'+E.HTTP_ROUTES[t]
+    else: kind='script'
+    print(t, kind)
+" 2>/dev/null)
+  if [ -z "$_toolmap" ]; then
+    warn "could not read the Hermes tool table out of jarvis-voice - dispatch coverage unverified"
+  else
+    _hass_token=$(grep -E "^JARVIS_HASS_TOKEN=" "$SECRETS_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d '\r')
+    _scripts=$(curl -s -m 15 -H "Authorization: Bearer $_hass_token" \
+                 "http://localhost:8123/api/states" 2>/dev/null \
+               | tr ',' '\n' | grep -oE '"script\.[a-z0-9_]+"' | tr -d '"' | sed 's/^script\.//' | sort -u)
+    _orphans=""; _n=0
+    while read -r _tool _kind; do
+      [ -n "$_tool" ] || continue
+      _n=$((_n+1))
+      case "$_kind" in
+        intent|context) : ;;
+        http:*) : ;;   # liveness of those services is checked below and in 23
+        script)
+          # An empty script list means HA or the token is broken, not that every
+          # tool is orphaned. Reporting 14 phantom failures for one auth problem
+          # would bury the real cause.
+          if [ -n "$_scripts" ] && ! printf '%s\n' "$_scripts" | grep -qx "$_tool"; then
+            _orphans="$_orphans $_tool"
+          fi
+          ;;
+      esac
+    done <<EOF
+$_toolmap
+EOF
+    if [ -z "$_scripts" ]; then
+      warn "could not list Home Assistant scripts - Hermes script-tool coverage unverified"
+    elif [ -n "$_orphans" ]; then
+      fail "Hermes tools with NO dispatch target:$_orphans - each one fails in the executor and falls through to an agent that cannot do it either, so JARVIS will confirm an action that never happened; add them to HTTP_ROUTES in hermes/executor.py or create the matching script"
+    else
+      ok "all $_n Hermes tools have a dispatch target (intent, script, context or HTTP service)"
+    fi
+  fi
+else
+  warn "jarvis-voice is not running - Hermes dispatch coverage unverified"
+fi
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+sec "25. WhatsApp bridge"
+_wa=$(curl -s -m 8 "http://localhost:8097/health" 2>/dev/null)
+if [ -z "$_wa" ]; then
+  fail "nothing answers http://localhost:8097/health - the WhatsApp bridge is down, so sending and reading messages by voice are both dead; the 'JARVIS - WhatsApp' task should restart it within 5 minutes"
+else
+  _wasvc=$(printf '%s' "$_wa" | grep -oE '"service"[[:space:]]*:[[:space:]]*"[^"]+"' | cut -d'"' -f4)
+  if [ "$_wasvc" != "jarvis-whatsapp" ]; then
+    warn "8097 answers but reports service='$_wasvc' - expected jarvis-whatsapp"
+  else
+    _linked=$(printf '%s' "$_wa" | grep -oE '"linked"[[:space:]]*:[[:space:]]*(true|false)' | grep -oE '(true|false)')
+    if [ "$_linked" = "true" ]; then
+      ok "WhatsApp bridge is linked and serving"
+    else
+      # Not a FAIL: the fix is a QR scan on Natik's phone, which no amount of
+      # server-side work can perform. But it must not be silent either -- an
+      # unlinked bridge means every "message mum" turn ends in a refusal.
+      warn "WhatsApp bridge is running but NOT linked - scan the QR in jarvis/wa/wa-bridge.log from WhatsApp > Linked devices, or sending and reading stay dead"
+    fi
+  fi
+
+  # The bridge must never answer an unauthenticated request. It holds the
+  # ability to message real people.
+  _wacode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/json' \
+              -d '{"to":"mum","message":"audit probe - must never send"}' \
+              "http://localhost:8097/send" 2>/dev/null)
+  case "$_wacode" in
+    401) ok "WhatsApp /send refuses an unauthenticated request (http 401)" ;;
+    200) fail "WhatsApp /send ACCEPTED an unauthenticated request - anything that can reach loopback can message Natik's contacts; the bridge must fail closed" ;;
+    *)   warn "WhatsApp /send returned http $_wacode to an unauthenticated request - expected 401" ;;
+  esac
+fi
+
+# The contact allowlist is the only thing standing between a misheard word and a
+# message to the wrong person, so its absence is a failure even though the
+# bridge would then simply refuse everything.
+_cf="/c/ServerData/Stacks/jarvis/wa/contacts.json"
+if [ -f "$_cf" ]; then
+  # Counted with a JSON parser, not a grep. contacts.json carries a long
+  # "_comment" array explaining the allowlist, and a line-wise grep counted
+  # every line of that prose as a contact -- it reported 15 when there are 2.
+  _nc=$(python -c "
+import json,sys
+d=json.load(open(r'C:\ServerData\Stacks\jarvis\wa\contacts.json',encoding='utf-8'))
+print(len([k for k in d if not k.startswith('_')]))
+" 2>/dev/null || echo "?")
+  if grep -qE '"(any|all|\*)"\s*:' "$_cf"; then
+    fail "contacts.json contains a wildcard entry - the allowlist is the whole safety model for sending; remove it"
+  else
+    ok "WhatsApp contact allowlist present ($_nc entries)"
+  fi
+else
+  fail "jarvis/wa/contacts.json is missing - the bridge refuses every send, so messaging is dead"
+fi
 # ---------------------------------------------------------------------------
 _emit ""
 _emit "============================================================"
