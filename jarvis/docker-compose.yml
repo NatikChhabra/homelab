@@ -1,0 +1,382 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jarvis-ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    environment:
+      - TZ=Asia/Kolkata
+      - OLLAMA_HOST=0.0.0.0:11434
+      # Keep the model resident. A cold load costs 3-8s on this box, which alone
+      # blows the sub-3s voice target on the first command after any idle period.
+      - OLLAMA_KEEP_ALIVE=-1
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - jarvis
+    # GPU passthrough, ENABLED 2026-08-08 after the root cause was fixed.
+    #
+    # The RTX 3050 (PCI\VEN_10DE&DEV_25A2) had no NVIDIA display driver: Windows
+    # had bound its generic `BasicDisplay` driver to the card, which cannot
+    # drive an Optimus dGPU, so the device sat at "cannot start (Code 10)" and
+    # nvidia-container-cli reported "WSL environment detected but no adapters
+    # were found". Installing NVIDIA 610.88 fixed it with no reboot -- but
+    # Docker Desktop DID need a restart, because WSL projects the host driver
+    # libraries into /usr/lib/wsl/lib only at VM boot, so a running VM keeps
+    # serving stale ones.
+    #
+    # Acceptance test, re-run this if the GPU ever seems to vanish:
+    #   docker run --rm --gpus all --entrypoint nvidia-smi ollama/ollama
+    # and confirm with:
+    #   docker exec jarvis-ollama ollama ps    (PROCESSOR must not say 100% CPU)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  home-assistant:
+    image: homeassistant/home-assistant:latest
+    container_name: jarvis-hass
+    restart: always
+    privileged: true
+    ports:
+      - "8123:8123"
+    environment:
+      - TZ=Asia/Kolkata
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - hass_config:/config
+      - /run/dbus:/run/dbus:ro
+    networks:
+      - jarvis
+    depends_on:
+      - ollama
+    # Probe an UNAUTHENTICATED endpoint. The previous healthcheck curled /api/,
+    # which requires a bearer token, so it returned 401 forever: the container
+    # sat "unhealthy" through 56 straight probes while HA was perfectly fine,
+    # and every probe was logged as a failed login attempt (http.ban warnings).
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8123/manifest.json >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  wyoming-whisper:
+    # Built from Dockerfile.whisper, which is rhasspy/wyoming-whisper plus the
+    # CUDA libraries. The stock image is CPU-only: `--device cuda` against it
+    # dies on "libcublas.so.12 is not found" and, because the Wyoming handler
+    # swallows the exception, returns EMPTY transcripts in ~100 ms -- it looks
+    # fast while understanding nothing. (The old compose referenced
+    # rhasspy/wyoming-faster-whisper, which 404s on Docker Hub; that is what
+    # Phase 1 misread as "Wyoming images not found on registry".)
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    image: jarvis-whisper-cuda:latest
+    container_name: jarvis-whisper
+    restart: always
+    # `small-int8` rather than `base-int8`, and NO forced --language, because
+    # Natik speaks Hindi to it as well as English. Pinned to `en`, Whisper
+    # transliterated Hindi into English letters ("लाइट चालू करो" came back as
+    # "Light Charu Kuru"), and `base` is too small to decode Hindi reliably at
+    # all -- on auto it returned "like, channel, and subscribe to my channel."
+    # Replies stay English; this is about UNDERSTANDING Hindi, not speaking it.
+    command: >-
+      --model small-int8
+      --language auto
+      --device cuda
+      --beam-size 1
+    # Shares the 4 GB GPU with Ollama (qwen2.5:3b holds ~2.2 GB, leaving ~1.8).
+    # If a larger LLM is ever chosen and this OOMs, drop `--device cuda` from the
+    # command above -- the cost is STT returning to ~2.4 s, not a failure.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "10300:10300"
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - whisper_data:/data
+    # Downloads the model from HuggingFace on first run; the ISP resolver is not
+    # trustworthy for that (same reason the streaming stack pins its resolvers).
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    networks:
+      - jarvis
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket;socket.create_connection(('127.0.0.1',10300),timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+  wyoming-piper:
+    # Kokoro was the brief's first choice but there is no Wyoming-Kokoro image
+    # under the rhasspy org (rhasspy/wyoming-kokoro 404s). Piper is the
+    # maintained fallback the brief allows. Revisit if a Kokoro Wyoming server
+    # turns out to exist elsewhere.
+    image: rhasspy/wyoming-piper:latest
+    container_name: jarvis-piper
+    restart: always
+    # British voice, because Jarvis.
+    command: >-
+      --voice en_GB-alan-medium
+    ports:
+      - "10200:10200"
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - tts_data:/data
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    networks:
+      - jarvis
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket;socket.create_connection(('127.0.0.1',10200),timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  kokoro:
+    # THE VOICE. Piper's en_GB-alan-medium was rejected as northern English
+    # rather than the RP that "Jarvis" means, and en_GB-vctk-medium was worse:
+    # VCTK is an unpolished research corpus and its speakers are barely
+    # intelligible. Auditioning further Piper voices was wasted effort because
+    # the ceiling is the ENGINE, not the voice file -- Piper is a fast
+    # small-footprint vocoder and simply does not produce that texture.
+    #
+    # Kokoro-82M does, and kokoro-fastapi can BLEND speakers (bm_george+bm_fable),
+    # which is the closest thing to a bespoke voice without cloning an actor.
+    # This is a deliberate quality-over-latency trade, agreed explicitly.
+    #
+    # NOT a Wyoming service: no Wyoming-Kokoro server exists (rhasspy/wyoming-kokoro
+    # has never existed and was Phase 1's wrong turn). It speaks an
+    # OpenAI-compatible HTTP API instead, which is why tts_engine.py talks to it
+    # over aiohttp rather than through wyoming_client.py.
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    container_name: jarvis-kokoro
+    restart: always
+    ports:
+      - "8880:8880"
+    environment:
+      - TZ=Asia/Kolkata
+    networks:
+      - jarvis
+    # Same GPU passthrough as ollama. The 4 GB card is shared three ways
+    # (qwen2.5:3b ~2.2 GB, whisper small-int8 CUDA, and now this); Kokoro-82M
+    # itself is only ~300 MB of weights but a PyTorch CUDA context costs a few
+    # hundred MB more on top. MEASURED free VRAM before adding it: 1326 MiB.
+    # If this ever pushes Ollama or Whisper onto the CPU, switch this image to
+    # the `-cpu` tag -- an 82M model is perfectly viable on CPU and the cost is
+    # latency, not failure.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Downloads voice packs from HuggingFace on first run; same untrustworthy
+    # ISP resolver problem as whisper.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    # Probes the voices endpoint, not just the port. A bare TCP check passes
+    # while the model is still loading, and the difference is that JARVIS would
+    # silently fall back to Piper for the first minute after every restart --
+    # which sounds like "the new voice didn't work" rather than "not ready yet".
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:8880/v1/audio/voices',timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  wyoming-openwakeword:
+    image: rhasspy/wyoming-openwakeword:latest
+    container_name: jarvis-wake-word
+    restart: always
+    # hey_jarvis is a pretrained openWakeWord model; nothing to train.
+    command: >-
+      --preload-model hey_jarvis
+      --threshold 0.3
+      --trigger-level 1
+    ports:
+      - "10400:10400"
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - openwakeword_data:/data
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    networks:
+      - jarvis
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket;socket.create_connection(('127.0.0.1',10400),timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  jarvis-voice:
+    # Serves the Web Audio client and proxies the browser's pipeline traffic to
+    # Home Assistant. The proxy exists so the long-lived HA token stays
+    # server-side: the browser never receives a credential, which matters
+    # because this UI is opened from the desktop, the phone, and Rainmeter.
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: jarvis-voice:latest
+    container_name: jarvis-voice
+    restart: always
+    ports:
+      - "3100:3100"
+    environment:
+      - TZ=Asia/Kolkata
+      - PUID=1000
+      - PGID=1000
+      - HASS_URL=http://jarvis-hass:8123
+      - WHISPER_HOST=jarvis-whisper
+      - WHISPER_PORT=10300
+      - PIPER_HOST=jarvis-piper
+      - PIPER_PORT=10200
+      # TTS_ENGINE picks the voice engine; piper remains a working fallback and
+      # tts_engine.py drops to it automatically if Kokoro cannot produce a first
+      # chunk, so a Kokoro outage costs voice quality, never speech itself.
+      - TTS_ENGINE=kokoro
+      - KOKORO_URL=http://jarvis-kokoro:8880
+      # CHOSEN BY NATIK 2026-08-09 after a blind-ish audition of 15 samples.
+      # His verdict on the first round was precise and worth preserving, because
+      # it separated two things people usually conflate: he liked the TIMBRE of
+      # george+lewis but the DELIVERY of george+fable. Those are different axes
+      # -- timbre is the blended embedding, delivery is mostly `speed` plus how
+      # much fable survives the mix -- so the second round swept weights and
+      # speed independently. This is george+lewis kept dominant with fable at
+      # 1/7 of the blend: enough to carry fable's cadence, not enough to
+      # displace the voice he picked. An equal 1:1:1 blend was tried and washes
+      # out. His words on this one: "this is just fucking perfect".
+      - KOKORO_VOICE=bm_george(3)+bm_lewis(3)+bm_fable(1)
+      # 0.92 rather than 1.0: JARVIS should never sound hurried. 0.86 and 0.82
+      # were rendered and rejected as too slow, 0.98 as too brisk.
+      - KOKORO_SPEED=0.92
+      - WAKE_HOST=jarvis-wake-word
+      - WAKE_PORT=10400
+    # JARVIS_HASS_TOKEN (long-lived HA token) must be added here. Repo rule:
+    # secrets live only in Stacks/secrets.env, never in a compose file.
+    #
+    # jarvis/secrets.env is loaded as well, and that is not drift -- it is where
+    # the host-side services already keep their own tokens: JARVIS_WA_TOKEN is
+    # read from it by wa/start-wa.ps1, and JARVIS_WOL_TOKEN by
+    # host-helper/pc-agent.ps1. hermes/executor.py needs those SAME two values
+    # to call those services, so the file is shared rather than copied.
+    #
+    # Copying the tokens into Stacks/secrets.env instead was the obvious move
+    # and is the wrong one: two copies of a credential drift the moment one is
+    # rotated, and the failure that produces is a 401 at 3 a.m. on the half of
+    # the system nobody rotated.
+    env_file:
+      - ../secrets.env
+      - ./secrets.env
+    volumes:
+      # Screenshots directory: captures_screen.py writes here on the host,
+      # mounted into the container so /api/hud/screen can serve them.
+      - ./screenshots:/app/screenshots
+    networks:
+      - jarvis
+    depends_on:
+      - home-assistant
+      - wyoming-whisper
+      - wyoming-piper
+      - kokoro
+      - wyoming-openwakeword
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3100/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  capabilities:
+    # Timers, reminders, spoken announcements and "what is the state of the
+    # server" answers. Brought under compose 2026-08-09: it had been started by
+    # hand with `docker run`, so it appeared in NO compose file, was NOT backed
+    # up, was NOT in version control, and the audit correctly flagged it as a
+    # container that "fails invisibly". Everything below was read back off the
+    # running container with `docker inspect` so this reproduces it exactly.
+    build:
+      context: ./capabilities
+      dockerfile: Dockerfile
+    image: jarvis-capabilities:latest
+    container_name: jarvis-capabilities
+    restart: always
+    ports:
+      - "3102:3102"
+    environment:
+      - TZ=Asia/Kolkata
+      - PORT=3102
+      - CAPABILITIES_DATA=/data
+      # host.docker.internal, not localhost: glances and vikunja run on the
+      # WINDOWS HOST, not in this stack, so a container-local address finds
+      # nothing.
+      - GLANCES_URL=http://host.docker.internal:61208
+      - VIKUNJA_URL=http://host.docker.internal:3456
+      - AUDIT_REPORT=/audit/server-audit-report.txt
+      - PIPER_HOST=jarvis-piper
+      - PIPER_PORT=10200
+      - PIPER_VOICE=en_GB-alan-medium
+    volumes:
+      # Timers must survive a restart -- a reminder that evaporates when the
+      # container recycles is worse than no reminder, because it was trusted.
+      - ./capabilities/data:/data
+      # Read-only: this only ever reports the audit, never writes it.
+      - ../server-audit-report.txt:/audit/server-audit-report.txt:ro
+    networks:
+      - jarvis
+    depends_on:
+      - home-assistant
+    # Probes /healthz on the REAL port. Two separate mistakes were live here at
+    # once: the old hand-run container probed port 3101 while the service
+    # listens on 3102, and the path is /healthz, not /health. Either alone
+    # pinned the container at "unhealthy" forever while it served every request
+    # perfectly -- the same false-alarm class that made jarvis-hass look broken
+    # for 56 consecutive probes. Verified against the route table in
+    # capabilities/server.py rather than assumed.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:3102/healthz',timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  ollama_data:
+    external: true
+  hass_config:
+    external: true
+  whisper_data:
+    external: true
+  # tts_data holds Piper voice models (kept the existing volume name rather than
+  # making the operator create a new one).
+  tts_data:
+    external: true
+  openwakeword_data:
+    external: true
+
+networks:
+  jarvis:
+    driver: bridge
