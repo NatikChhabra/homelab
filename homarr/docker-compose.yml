@@ -42,6 +42,9 @@ services:
       - adguard_default
       - portainer_default
       - navidrome_default
+      # Added 2026-08-08 with the JARVIS tile. The jarvis stack declares its own
+      # network key, so the name is jarvis_jarvis, not jarvis_default.
+      - jarvis_jarvis
 
 volumes:
   homarr_data:
@@ -67,4 +70,6 @@ networks:
   portainer_default:
     external: true
   navidrome_default:
+    external: true
+  jarvis_jarvis:
     external: true

@@ -40,6 +40,7 @@ for what to change before any of this runs on your own hardware. Licensed MIT
 | `immich` | immich-server, machine-learning, postgres, valkey | Photo library. |
 | `portainer` | portainer | Container management UI. |
 | `navidrome` | navidrome | Self-hosted music streaming (Subsonic API). |
+| `jarvis` | home-assistant, ollama, whisper, piper, openwakeword, voice bridge | Local voice assistant. Speech recognition, language model and speech synthesis all run on this box; no cloud speech API is involved. |
 
 Immich and Portainer were brought into this tree on 2026-07-28. Immich's compose
 file had been living in a Docker Desktop AI-agent scratch directory that Docker
@@ -55,14 +56,16 @@ Kept in one place because the cost of a collision is a service that silently
 fails to bind.
 
 ```
-  53   adguard (DNS)      6767  bazarr           8222  vaultwarden
-3001   uptime-kuma        6881  qbittorrent      8989  sonarr
-3080   adguard (web UI)   7575  homarr           9443  portainer
-3456   vikunja            7878  radarr           9696  prowlarr
-4533   navidrome
-5055   jellyseerr         8080  qbittorrent      11011 cleanuparr
-6246   maintainerr        8095  filebrowser      61208 glances
-2283   immich             8096  jellyfin         8191  flaresolverr
+   53  adguard (DNS)      6881  qbittorrent (peer)   9443  portainer
+ 2283  immich             7575  homarr               9696  prowlarr
+ 3001  uptime-kuma        7878  radarr              10200  jarvis (piper TTS)
+ 3080  adguard (web UI)   8080  qbittorrent (web)   10300  jarvis (whisper STT)
+ 3100  jarvis (voice UI)  8095  filebrowser         10400  jarvis (wake word)
+ 3456  vikunja            8096  jellyfin            11011  cleanuparr
+ 4533  navidrome          8123  jarvis (home asst)  11434  jarvis (ollama)
+ 5055  jellyseerr         8191  flaresolverr        61208  glances
+ 6246  maintainerr        8222  vaultwarden
+ 6767  bazarr             8989  sonarr
 ```
 
 ## Storage layout
@@ -176,8 +179,9 @@ It covers containers and HTTP endpoints for every stack, that the media disk is
 genuinely mounted rather than an empty stub, disk headroom, hardlink efficiency,
 BitTorrent transport, outbound DNS to the metadata providers, app health, library
 consistency, that DNS filtering actually resolves a name rather than merely
-running, that every photo in the database still has its original file on disk,
-that backups are current and actually extract, that the photo backup is not
+running, that the voice services answer a real Wyoming handshake with their
+models installed, that every photo in the database still has its original file on
+disk, that backups are current and actually extract, that the photo backup is not
 silently shrinking, and that no credential is hardcoded or tracked by git.
 
 A few of those deserve their own note, because they are the ones that taught the
@@ -195,6 +199,89 @@ most:
 - **A backup that runs perfectly can still protect nothing.** If the source is
   quietly emptying out, every individual backup "succeeds" while faithfully
   archiving less and less. Consecutive archives are compared for shrinkage.
+- **Probing the wrong endpoint fails forever and looks like an outage.** A
+  healthcheck aimed at an authenticated Home Assistant endpoint returned 401 on
+  every attempt, so the container reported `unhealthy` across 56 consecutive
+  probes while serving perfectly — and each probe was logged as a failed login,
+  walking it towards banning its own healthcheck. The audit probes an
+  unauthenticated endpoint for liveness, and separately checks that the stored
+  token still authenticates, because a revoked token has no other symptom.
+
+## The voice assistant
+
+`jarvis/` is a fully local voice assistant: six containers, no cloud speech API,
+no vendor account. Audio is captured in the browser, transcribed on this box,
+answered by a local language model, and spoken back by a local synthesiser.
+
+| Container | Port | Role |
+|---|---|---|
+| `jarvis-hass` | 8123 | Home Assistant — owns the devices and runs the conversation agent. |
+| `jarvis-ollama` | 11434 | Local language model runtime. |
+| `jarvis-whisper` | 10300 | Speech to text (Wyoming). |
+| `jarvis-piper` | 10200 | Text to speech (Wyoming). |
+| `jarvis-wake-word` | 10400 | Wake word detection, `hey_jarvis` (Wyoming). |
+| `jarvis-voice` | 3100 | Browser client, and the bridge between it and everything above. |
+
+Three things about this stack are non-obvious enough to be worth stating
+outright, because each one cost real time to work out:
+
+- **The three voice services do not speak HTTP.** Wyoming is a raw TCP JSONL
+  protocol. `curl http://localhost:10300/` fails against a perfectly healthy
+  Whisper, and that failure is not evidence of anything. An earlier health
+  endpoint did exactly that and reported all three services down while all three
+  were fine. The audit opens a socket and sends a real `describe` handshake
+  instead, using the client in `jarvis/wyoming_client.py`.
+- **A Wyoming container answers its port before it can do its job.** These
+  images fetch their models on first run, so the container is up and accepting
+  connections for minutes before it can transcribe or speak — and forever, if
+  the download failed. The audit counts *installed models*, not connections.
+- **The browser client has to be served over HTTPS.** `getUserMedia` requires a
+  secure context. Over plain HTTP on a tailnet address `navigator.mediaDevices`
+  is `undefined`, so the microphone fails with a bare `TypeError` and the page
+  looks broken with nothing anywhere naming the cause. `tailscale serve` supplies
+  the TLS on port **8443**, deliberately not 443 — 443 already serves Vaultwarden,
+  and `tailscale serve` without an explicit port replaces that handler rather
+  than adding to it. The audit asserts both mappings for that reason.
+
+The bridge exists so the Home Assistant token stays server-side: the browser
+never receives a credential. `JARVIS_HASS_TOKEN` lives in `secrets.env` like
+every other credential here.
+
+**This stack is not finished.** The language model currently runs on CPU, which
+puts a warm round trip around 8 seconds against a 3 second target, and model
+selection is still open. `jarvis/STATUS.md` records what has actually been
+measured and what has not; it is the honest account, and it is deliberately kept
+free of aspirational claims.
+
+### Adding the JARVIS tile to Homarr
+
+Homarr stores its boards in **SQLite** (`/appdata/db/db.sqlite`, a Drizzle-managed
+schema spread across `app`, `item`, `item_layout`, `layout` and `section`), not in
+an editable JSON file. Do not hand-edit that database — a tile is several rows
+that have to stay mutually consistent, and Homarr caches board state. Add it
+through the UI:
+
+1. Open Homarr and go to **`/manage/apps/new`**.
+2. Fill in:
+   - **Name** — `JARVIS`
+   - **URL** — `https://<your-tailnet-host>:8443/`
+     **This must be the HTTPS address, not `http://<host>:3100/`.** The tile is
+     how the assistant actually gets opened, and over plain HTTP the microphone
+     silently will not start. This is the same reason Vaultwarden's tile uses an
+     HTTPS URL while every other tile uses a plain LAN one.
+   - **Ping URL** — `http://jarvis-voice:3100/healthz`
+     A container name, not the host address: Homarr runs its status checks
+     server-side from inside its own container, and on Docker Desktop for
+     Windows a container cannot reach the host's published ports. `/healthz`
+     returns `{"status": "ok"}` with a 200.
+   - **Icon** — search `home-assistant`, or any icon you prefer.
+3. Save, then open the board at **`/boards/dashboard`**, turn on edit mode, add
+   an **App** item to the **Infrastructure** section, and select `JARVIS`.
+
+The status dot only works because `homarr-homarr-1` is attached to the
+`jarvis_jarvis` network — that is what the entry in `homarr/docker-compose.yml`
+is for. Without it the ping resolves nothing and the tile sits permanently red
+while the service is perfectly healthy.
 
 ## Networking, and one trap worth knowing
 
