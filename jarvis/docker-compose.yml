@@ -11,6 +11,12 @@ services:
       # Keep the model resident. A cold load costs 3-8s on this box, which alone
       # blows the sub-3s voice target on the first command after any idle period.
       - OLLAMA_KEEP_ALIVE=-1
+      # Flash attention reduces VRAM usage by ~40% on the 4GB RTX 3050 where
+      # Ollama, Whisper CUDA, and the display driver all compete. Without this
+      # the qwen2.5:3b model gets evicted every ~3 min by the WDDM driver.
+      - OLLAMA_FLASH_ATTENTION=1
+      # Only allow one request at a time to minimize peak VRAM.
+      - OLLAMA_NUM_PARALLEL=1
     volumes:
       - ollama_data:/root/.ollama
     networks:
