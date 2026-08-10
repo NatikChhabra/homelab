@@ -829,6 +829,48 @@ async def _prewarm_hermes(session: aiohttp.ClientSession) -> None:
         log.warning("Hermes warmup failed (%s); first user request will pay the cold start", exc)
 
 
+# --- Ollama keep-alive background task ------------------------------------
+# The RTX 3050 has only 4 GB VRAM shared between CUDA Whisper (~1.5 GB) and
+# Ollama qwen2.5:3b (~2.1 GB). Despite OLLAMA_KEEP_ALIVE=-1, the GPU driver
+# reclaims VRAM after ~5 min idle and evicts the model.
+#
+# Strategy: check /api/ps first. If model is already loaded, skip. If evicted,
+# do a warmup with 30s timeout (cold-start is ~15s). The warmup itself uses
+# the Hermes chat endpoint with num_predict=1 for minimal GPU time.
+_OLLAMA_KEEPALIVE_INTERVAL_S = 150  # 2.5 minutes (under the ~5 min eviction window)
+
+
+async def _ollama_keepalive_forever(session: aiohttp.ClientSession) -> None:
+    """Periodically ping Ollama to prevent VRAM eviction.
+
+    Without this, the model is evicted after ~5 min idle and the first user
+    request pays a 5-8 s cold-start penalty. With it, the model stays warm
+    and Hermes responds in 500-2000 ms every time.
+    """
+    if not ROUTER._hermes:
+        return
+    ollama_url = ROUTER._hermes.ollama_url
+    while True:
+        await asyncio.sleep(_OLLAMA_KEEPALIVE_INTERVAL_S)
+        try:
+            # Step 1: check if model is already loaded (fast, ~5ms).
+            async with session.get(
+                f"{ollama_url}/api/ps",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                data = await resp.json()
+                if data.get("models"):
+                    log.debug("Ollama keep-alive: model already resident, skip")
+                    continue
+            # Step 2: model was evicted — reload it with generous timeout.
+            t0 = time.perf_counter()
+            await ROUTER._hermes.ask(session, "ping", specialist="chat")
+            dt = (time.perf_counter() - t0) * 1000
+            log.info("Ollama keep-alive: model reloaded in %.0f ms", dt)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Ollama keep-alive failed: %s", exc)
+
+
 async def on_startup(app: web.Application) -> None:
     app["http"] = aiohttp.ClientSession()
     # Global voice state for the HUD: the aggregate of all connected sessions.
@@ -862,8 +904,22 @@ async def on_startup(app: web.Application) -> None:
     # model-load penalty (10-15s) that was killing the 8s turn timeout.
     await _prewarm_hermes(app["http"])
 
+    # Background keep-alive: ping Ollama every 3 min to prevent VRAM eviction
+    # on the 4 GB RTX 3050 where CUDA Whisper shares the same memory pool.
+    app["keepalive_task"] = asyncio.create_task(
+        _ollama_keepalive_forever(app["http"])
+    )
+
 
 async def on_cleanup(app: web.Application) -> None:
+    # Stop the keep-alive background task.
+    ka = app.get("keepalive_task")
+    if ka is not None:
+        ka.cancel()
+        try:
+            await ka
+        except asyncio.CancelledError:
+            pass
     verifier = app.get("verifier")
     if verifier is not None:
         await verifier.close()

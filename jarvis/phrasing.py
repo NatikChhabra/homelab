@@ -209,6 +209,14 @@ _rule(r"^turn\s+(on|off)\s+ac$",
 # feeling hot" / "I am feeling cold". Short forms ("feeling hot", "feeling hot
 # please") are NOT rewritten because HA rejects them; they fall through to the
 # model, which still succeeds at ~2.5 s.
+# Short-form comfort rewrites. The HA custom sentences require "I am feeling
+# hot" but users naturally say bare "feeling hot" or "feeling cold". Rewrite
+# to the full form so the local parser catches them at <50 ms instead of
+# falling through to Hermes (which times out when Ollama is cold).
+_rule(r"^feeling\s+hot(\s+please)?$", "I am feeling hot",
+      "short form -> full form for local parser")
+_rule(r"^feeling\s+cold(\s+please)?$", "I am feeling cold",
+      "same for cold")
 _rule(r"^i\s+am\s+feeling\s+hot$", "I am feeling hot",
       "script entity has no alias; full phrase is the only recognised form")
 _rule(r"^i\s+am\s+feeling\s+cold$", "I am feeling cold",

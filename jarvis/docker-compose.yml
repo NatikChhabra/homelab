@@ -174,22 +174,14 @@ services:
       - "8880:8880"
     environment:
       - TZ=Asia/Kolkata
+      # Force CPU mode to free ~500MB VRAM for Ollama.
+      - CUDA_VISIBLE_DEVICES=
     networks:
       - jarvis
-    # Same GPU passthrough as ollama. The 4 GB card is shared three ways
-    # (qwen2.5:3b ~2.2 GB, whisper small-int8 CUDA, and now this); Kokoro-82M
-    # itself is only ~300 MB of weights but a PyTorch CUDA context costs a few
-    # hundred MB more on top. MEASURED free VRAM before adding it: 1326 MiB.
-    # If this ever pushes Ollama or Whisper onto the CPU, switch this image to
-    # the `-cpu` tag -- an 82M model is perfectly viable on CPU and the cost is
-    # latency, not failure.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # GPU passthrough kept for image compatibility but CUDA_VISIBLE_DEVICES=""
+    # forces CPU execution. Kokoro-82M is only 300MB of weights and runs fine
+    # on CPU. This frees ~500MB VRAM for Ollama to stay resident (was evicted
+    # every ~3 min causing 5-8s cold-start on first user command).
     # Downloads voice packs from HuggingFace on first run; same untrustworthy
     # ISP resolver problem as whisper.
     dns:
