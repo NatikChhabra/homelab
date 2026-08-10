@@ -253,6 +253,48 @@ TOOLS: dict[str, dict] = {
         "wa_read",
         "Read Natik's most recent WhatsApp messages. Use whenever he asks what messages he has or who messaged him.",
         _NONE),
+
+    # --- Web search / research -----------------------------------------------
+    # These reach the websearch service on port 3101 (jarvis-websearch container).
+    # The service is the ONLY outbound internet path in this build -- every
+    # packet can be audited against its egress log. A search that the model
+    # cannot answer from snippets is refused with a named error, never a
+    # confident invention.
+    "web_search": _tool(
+        "web_search",
+        "Search the internet for facts, news, weather, or anything not in this house. Use for 'what is', 'how tall', 'who won', 'search for', 'latest news', 'weather in'. NEVER use for device commands.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The exact search query. Keep it short: a question or topic, not a paragraph.",
+                },
+            },
+            "required": ["query"],
+        }),
+    "web_fetch": _tool(
+        "web_fetch",
+        "Read the full content of a webpage given its URL. Use when a search result mentions a specific page that has the detailed answer.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The full URL to fetch. Must start with http:// or https://",
+                },
+            },
+            "required": ["url"],
+        }),
+
+    # --- Server monitoring ---------------------------------------------------
+    # Reads Docker host state from the capabilities service on port 3102.
+    # The capabilities service proxies Glances for CPU/mem and reads the audit
+    # report for container health, so one tool call gives a full server picture.
+    "server_status": _tool(
+        "server_status",
+        "Read the home server status: Docker container health, CPU, memory, disk. Use when asked about the server, 'server status', 'how is the server', 'container health'.",
+        _NONE),
 }
 
 
@@ -428,6 +470,26 @@ SPECIALISTS: dict[str, Specialist] = {
                   "can't breathe", "cannot breathe", "hawa", "hawa nahi",
                   "no air", "less cold", "thanda kam"],
     ),
+    # --- Research: web search and fetching -----------------------------------
+    # The ONLY specialist allowed to touch the internet. Its two tools reach the
+    # websearch service (port 3101), which is the single auditable egress point
+    # in the entire build. Placed BEFORE chat so search keywords always win
+    # over the talker -- "search for" must never land in chat.
+    "research": Specialist(
+        name="research",
+        tools=["web_search", "web_fetch", "server_status"],
+        role="You research facts on the internet and read server status. You control no devices in this room.",
+        keywords=["search", "search for", "look up", "find out", "what is", "who won",
+                  "who is", "how tall", "how many", "when did", "weather",
+                  "latest news", "news today", "top headlines", "research",
+                  "tell me about", "what happened", "server status",
+                  "server health", "how is the server", "container health",
+                  "docker status", "uptime kuma", "what does", "define",
+                  "explain", "difference between", "compare", "opinion on",
+                  "what's the", "when is", "where is", "why did", "how much"],
+        negative=["light", "lights", "fan", "ac", "air conditioner", "tv",
+                  "movie", "whatsapp", "message", "pc", "computer", "laptop"],
+    ),
     # The talker. Zero tools by design. "what's the weather", "tell me a joke"
     # and "who are you" used to fall through to comfort's 6 tools, where the
     # model -- handed an AC and a fan -- answered conversationally at best and
@@ -440,11 +502,11 @@ SPECIALISTS: dict[str, Specialist] = {
         tools=[],
         role="You are JARVIS, Natik's butler. You control no devices: answer, chat, "
              "keep it short and dry. If asked something factual you do not know, say so.",
-        keywords=["weather", "joke", "jokes", "time", "date", "news", "hello",
+        keywords=["joke", "jokes", "time", "date", "hello",
                   "hi", "hey", "thanks", "thank you", "who are you",
                   "how are you", "what can you do", "good morning",
                   "good afternoon", "good evening", "how's it going",
-                  "how are things"],
+                  "how are things", "im home", "i'm back", "welcome home"],
         talk_only=True,
     ),
 }

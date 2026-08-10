@@ -926,6 +926,22 @@ async def on_cleanup(app: web.Application) -> None:
     await app["http"].close()
 
 
+
+# HUD skin download -- one click for the Rainmeter package.
+# The skin zip lives in ui/ alongside install-hud.ps1. Mounting the whole
+# ui/ dir as static would expose install scripts and source, so we serve
+# only the zip under /download/hud.
+async def download_hud(request):
+    hud_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ui')
+    zip_path = os.path.join(hud_dir, 'jarvis-skin.zip')
+    if not os.path.exists(zip_path):
+        return web.HTTPNotFound()
+    resp = web.FileResponse(zip_path)
+    resp.content_type = 'application/zip'
+    resp.headers['Content-Disposition'] = 'attachment; filename="JARVIS-HUD.rmskin"'
+    return resp
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
@@ -944,6 +960,7 @@ def build_app() -> web.Application:
     # Panels, the display-directive channel, and the allowlisted actuation
     # endpoint. Registered last and entirely additively: every route it adds is
     # under /api/hud/, so nothing above can change behaviour.
+    app.add_routes([web.get("/download/hud", download_hud)])
     hud.register(app)
     return app
 

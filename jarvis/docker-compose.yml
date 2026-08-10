@@ -204,6 +204,64 @@ services:
       retries: 3
       start_period: 180s
 
+
+  searxng:
+    # Self-hosted SearxNG metasearch. The ONLY container that touches external
+    # search engines. The websearch agent on port 3101 is the single outbound
+    # path from JARVIS; this container is its upstream.
+    image: searxng/searxng:latest
+    container_name: jarvis-searxng
+    restart: always
+    ports:
+      - "8100:8080"
+    environment:
+      - TZ=Asia/Kolkata
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+    volumes:
+      - ./websearch/searxng-settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - jarvis
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/search?q=test&format=json >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  websearch:
+    # Web search agent: the ONLY process in this stack allowed to touch the
+    # internet. Built from websearch/Dockerfile; queries SearxNG locally and
+    # optionally summarises via Ollama. The egress log at GET /api/egress is
+    # the audit trail for every outbound packet.
+    build:
+      context: ./websearch
+      dockerfile: Dockerfile
+    image: jarvis-websearch:latest
+    container_name: jarvis-websearch
+    restart: always
+    ports:
+      - "3101:3101"
+    environment:
+      - TZ=Asia/Kolkata
+      - PORT=3101
+      - SEARXNG_URL=http://jarvis-searxng:8080
+      - OLLAMA_URL=http://jarvis-ollama:11434
+      - JARVIS_WEBSEARCH_ENABLED=1
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    networks:
+      - jarvis
+    depends_on:
+      - ollama
+      - searxng
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:3101/healthz',timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   wyoming-openwakeword:
     image: rhasspy/wyoming-openwakeword:latest
     container_name: jarvis-wake-word
