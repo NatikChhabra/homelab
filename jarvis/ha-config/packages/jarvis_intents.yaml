@@ -1,0 +1,155 @@
+# Handlers for the custom sentences in /config/custom_sentences/en/jarvis.yaml.
+#
+# Each intent runs an existing script -- nothing here reimplements device
+# control, it only gives the LOCAL parser a way to reach scripts that previously
+# needed the model. Measured 2026-08-09: local 10-60 ms, model 750-5600 ms.
+#
+# Two properties worth preserving if this file is edited:
+#
+# 1. NO TOOL BUDGET COST. intent_script handlers are invisible to the model's
+#    tool schema, so none of this moves the exposed-tool count. That matters:
+#    accuracy collapsed at 30+ tools and the cliff between 13 and 30 is still
+#    unmeasured. script.movie_time is reachable here WITHOUT exposing it, which
+#    is exactly the bug audit section 20 was catching -- the model used to claim
+#    "Movie time activated." while last_triggered stayed None.
+#
+# 2. SPEECH MATCHES THE PROMPT'S VOICE. These strings are spoken aloud by the
+#    same pipeline as the model's replies, so they follow jarvis-prompt.txt:
+#    at most ~12 words, no preamble, no entity ids, "sir" occasionally rather
+#    than every line. A local reply that sounds different from a model reply
+#    makes the routing audible, which defeats the point.
+
+intent_script:
+  JarvisSetAcTemperature:
+    action:
+      - service: script.ac_set_temperature
+        data:
+          temperature: "{{ temperature | int }}"
+    speech:
+      # `| int` on the way out too: the slot arrives as a float and "AC at 22.0,
+      # sir." is what actually gets SPOKEN otherwise -- Piper reads the decimal.
+      text: "AC at {{ temperature | int }}, sir."
+
+  JarvisSetFanSpeed:
+    action:
+      - service: script.fan_set
+        data:
+          level: "{{ level | int }}"
+    speech:
+      text: "Fan on {{ level | int }}."
+
+  JarvisLightsOn:
+    action:
+      - service: light.turn_on
+        target:
+          area_id: bedroom
+    speech:
+      text: "Lights on."
+
+  JarvisLightsOff:
+    action:
+      - service: light.turn_off
+        target:
+          area_id: bedroom
+    speech:
+      text: "Lights off."
+
+  JarvisFanOn:
+    action:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.fan
+    speech:
+      text: "Fan on."
+
+  JarvisFanOff:
+    action:
+      - service: fan.turn_off
+        target:
+          entity_id: fan.fan
+    speech:
+      text: "Fan off."
+
+  JarvisMovieTime:
+    action:
+      - service: script.movie_time
+    speech:
+      text: "Movie time."
+
+  # Comfort actions come straight from the prompt's table:
+  #   hot -> AC 22 and fan 4;  very hot -> max cooling and fan boost
+  #   cold -> AC 27, fan 1;    humid -> dry;  stuffy -> fan 4
+  JarvisFeelingHot:
+    action:
+      - service: script.feeling_hot
+    speech:
+      text: "Cooling things down."
+
+  JarvisVeryHot:
+    action:
+      - service: script.ac_max_cool
+      - service: script.fan_boost
+    speech:
+      text: "Maximum cooling, sir."
+
+  JarvisFeelingCold:
+    action:
+      - service: script.feeling_cold
+    speech:
+      text: "Warming it up."
+
+  JarvisHumid:
+    action:
+      - service: script.ac_dry
+    speech:
+      text: "Dry mode on."
+
+  JarvisStuffy:
+    action:
+      - service: script.fan_set
+        data:
+          level: 4
+    speech:
+      text: "Fan on four."
+
+  JarvisFanBoost:
+    action:
+      - service: script.fan_boost
+    speech:
+      text: "Fan boosted."
+
+  JarvisAcOn:
+    action:
+      - service: script.ac_on
+    speech:
+      text: "AC on."
+
+  JarvisAcOff:
+    action:
+      - service: script.ac_off
+    speech:
+      text: "AC off."
+
+  JarvisTvToggle:
+    action:
+      - service: script.tv_toggle
+    speech:
+      text: "TV toggled."
+
+  JarvisGoodNight:
+    action:
+      - service: script.good_night
+    speech:
+      text: "Good night, sir."
+
+  JarvisAllOff:
+    action:
+      - service: script.all_off
+    speech:
+      text: "Everything off."
+
+  JarvisImHome:
+    action:
+      - service: script.im_home
+    speech:
+      text: "Welcome home, sir."

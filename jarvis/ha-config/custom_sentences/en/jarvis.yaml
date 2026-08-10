@@ -1,0 +1,234 @@
+# JARVIS custom sentences -- the local parser's vocabulary.
+#
+# WHY THIS FILE EXISTS
+# Measured 2026-08-09: HA's built-in parser answers in 10-60 ms, the qwen2.5:3b
+# agent in 750-5600 ms for the same command. Everything moved into this file is
+# a ~50x latency win AND costs zero tool budget, because custom sentences are
+# matched by the intent engine, not by the model's tool schema. The tool-count
+# cliff that has broken this project twice is not touched by anything here.
+#
+# WHAT BELONGS HERE
+# Only DETERMINISTIC mappings -- phrasings whose action is fixed and knowable
+# without reasoning. The comfort table below is deterministic by definition:
+# jarvis-prompt.txt already specifies exactly which action each feeling maps to,
+# so having the 3B model re-derive it every time costs 2.5 s to reach a
+# predetermined answer.
+#
+# WHAT DOES NOT BELONG HERE
+# Anything needing real inference -- novel phrasings, multi-device requests,
+# follow-ups, anything conversational. Those still fall through to the model,
+# which is what the router's fallback is for. A sentence added here that is too
+# broad will SHADOW the model and make JARVIS dumber, so patterns are written
+# tight and alternatives are enumerated rather than wildcarded.
+#
+# The wording of each action is kept consistent with jarvis-prompt.txt: at most
+# ~12 words, spoken aloud, no entity ids, occasional "sir".
+
+language: en
+
+intents:
+  # --- argument extraction ------------------------------------------------
+  # "set the AC to 22" was the canonical failure: through the model it emitted
+  # action=on and DROPPED the temperature (see the tool-grouping note in
+  # HANDOFF.md). A slot list cannot drop the argument -- it either matches the
+  # range or does not match at all.
+  JarvisSetAcTemperature:
+    data:
+      - sentences:
+          - "set (the |)(ac|a c|a/c|air con|air conditioner|aircon) to {temperature}"
+          - "set (the |)(ac|a c|a/c|air con|air conditioner|aircon) (temperature |temp |)to {temperature}"
+          - "(ac|a c|a/c|air con|air conditioner|aircon) (to|at|on) {temperature}"
+          - "make (the |)(ac|a c|air conditioner) {temperature}"
+          - "put (the |)(ac|a c|air conditioner) (to|at|on) {temperature}"
+          - "{temperature} degrees"
+          - "set (the |)(ac|a c|air conditioner) to {temperature} degrees"
+
+  # Fan speed 1-5. The model failed this too ("set the fan to speed 3" ->
+  # "not aware of any device called fan to"). The unit is a 5-speed fan exposed
+  # as a percentage, and script.fan_set takes the 0-6 level directly, so the
+  # slot maps straight onto the script with no conversion.
+  JarvisSetFanSpeed:
+    data:
+      - sentences:
+          - "set (the |)fan to (speed |level |)[number ]{level}"
+          - "set (the |)fan speed to [number ]{level}"
+          - "(fan|the fan) (speed|level) [number ]{level}"
+          - "put (the |)fan (on|to|at) (speed |level |)[number ]{level}"
+          - "change (the |)fan (speed|level) to [number ]{level}"
+          - "make (the |)fan (speed |level |)[number ]{level}"
+          - "fan (on|to|at) (speed |level |)[number ]{level}"
+          - "pankha [speed |level ]{level}"
+
+  # --- the comfort table, verbatim from jarvis-prompt.txt -----------------
+  # Each of these has ONE correct action already written down in the prompt.
+  # Note "it's humid in here" is the phrasing that failed 8 out of 8 times
+  # through the model: the prompt paired humidity with a fan action while the
+  # tool set had no fan tool, so the model narrated instead of acting. Matched
+  # here it simply runs AC dry mode.
+  JarvisFeelingHot:
+    data:
+      - sentences:
+          - "(it's|it is|its) (boiling|roasting|baking|sweltering)[ in here| here]"
+          - "(i'm|i am|im) (hot|sweating|boiling|roasting)"
+          - "(it's|it is|its) (so |too |very |really |)hot[ in here| here]"
+          - "(garmi|bahut garmi|garmi lag rahi hai|bahut garmi hai)"
+          - "yaar (bahut |)garmi (hai|lag rahi hai)"
+          - "(mujhe |)garmi lag rahi hai"
+
+  JarvisVeryHot:
+    data:
+      - sentences:
+          - "(it's|it is|its) (unbearable|unbearably hot|insanely hot|way too hot)"
+          - "(i'm|i am|im) (dying of heat|melting|burning up)"
+          - "(max|maximum) (cool|cooling)"
+          - "cool (it |the room |)down (fast|now|quickly)"
+
+  JarvisFeelingCold:
+    data:
+      - sentences:
+          - "(it's|it is|its) (freezing|too cold|so cold|very cold)[ in here| here]"
+          - "(i'm|i am|im) (cold|freezing|shivering)"
+          - "(thand|thand lag rahi hai|bahut thand hai)"
+          - "(mujhe |)thand lag rahi hai"
+
+  JarvisHumid:
+    data:
+      - sentences:
+          - "(it's|it is|its) (humid|sticky|muggy|clammy)[ in here| here]"
+          - "the air (is|feels) (sticky|damp|heavy)"
+          - "(i'm|i am|im) (sticky|clammy)"
+          - "(turn on |)(the |)(dry|dehumidify|dry mode)"
+
+  JarvisStuffy:
+    data:
+      - sentences:
+          - "(it's|it is|its) [so |too |very |really |a bit |](stuffy|airless|suffocating)[ in here| here]"
+          - "(there's|there is) no air[ in here| here]"
+          - "(i |)(need|want) some air"
+
+  # --- lights: bare and plural forms, plus Hinglish ------------------------
+  # These are ALSO covered by phrasing.py's rewrite layer in the router, but
+  # they are duplicated here on purpose: the rewrite only runs in our own voice
+  # pipeline, while these work everywhere HA listens -- the Assist panel, the
+  # companion app, any future satellite. The two paths agree on the action.
+  JarvisLightsOn:
+    data:
+      - sentences:
+          - "(turn|switch) on (all |)(the |)lights"
+          - "(turn|switch) (all |)(the |)lights on"
+          - "(all |)lights on"
+          - "(batti|roshni|light) (chalu|on)[ kar do| karo]"
+          - "(i |)(need|want) (some |)light"
+
+  JarvisLightsOff:
+    data:
+      - sentences:
+          - "(turn|switch) off (all |)(the |)lights"
+          - "(turn|switch) (all |)(the |)lights off"
+          - "(all |)lights off"
+          - "(batti|roshni|light) (band|bandh|off)[ kar do| karo]"
+
+  # --- fan on/off in Hinglish ---------------------------------------------
+  # "pankha band karo" is the single most-used Hindi command here.
+  JarvisFanOn:
+    data:
+      - sentences:
+          - "pankha (chalu|on)[ kar do| karo]"
+          - "(turn|switch) on (the |)fan"
+
+  JarvisFanOff:
+    data:
+      - sentences:
+          - "pankha (band|bandh|off)[ kar do| karo]"
+          - "(turn|switch) off (the |)fan"
+
+  # --- movie time ----------------------------------------------------------
+  # script.movie_time exists but is deliberately NOT exposed to the model:
+  # exposing it would push the tool count to 18 and break the tested budget.
+  # The model used to claim "Movie time activated." while last_triggered stayed
+  # None -- that is the live bug audit section 20 catches. Reaching the script
+  # through an intent fixes it at zero tool-budget cost.
+  JarvisMovieTime:
+    data:
+      - sentences:
+          - "movie time"
+          - "(i'm |i am |)(going to |about to |)watch (a |)(movie|film)"
+          - "(start|begin) movie (mode|time)"
+          - "(film|movie) (mode|dekhna hai)"
+
+  # --- fan boost ----------------------------------------------------------
+  # "boost the fan" fell through to the model at ~920 ms for a fixed action.
+  JarvisFanBoost:
+    data:
+      - sentences:
+          - "(boost|turbo) (the |)fan"
+          - "fan (boost|turbo|max|maximum|full)"
+          - "(set |put |)(the |)fan (on|to) (boost|turbo|max|maximum|full[ speed])"
+          - "pankha (tez|full|max)( karo|)"
+
+  # --- AC on/off, natural phrasings the built-in matcher misses ------------
+  JarvisAcOn:
+    data:
+      - sentences:
+          - "(turn|switch) (on |)(the |)(ac|a c|a/c|air con|air conditioner|aircon)[ on]"
+          - "(ac|air conditioner) (on|chalu)( kar do| karo|)"
+          - "start (the |)(ac|air conditioner)"
+
+  JarvisAcOff:
+    data:
+      - sentences:
+          - "(turn|switch) (off |)(the |)(ac|a c|a/c|air con|air conditioner|aircon)[ off]"
+          - "(ac|air conditioner) (off|band|bandh)( kar do| karo|)"
+          - "stop (the |)(ac|air conditioner)"
+
+  # --- TV: one IR button, so every phrasing is the same toggle -------------
+  JarvisTvToggle:
+    data:
+      - sentences:
+          - "(turn|switch) (the |)(tv|t v|television) (on|off)"
+          - "(turn|switch) (on|off) (the |)(tv|t v|television)"
+          - "(tv|television) (on|off)"
+          - "toggle (the |)(tv|t v|television)"
+          - "(tv|t v) (chalu|band|bandh)( kar do| karo|)"
+
+  # --- whole-room scripts --------------------------------------------------
+  JarvisGoodNight:
+    data:
+      - sentences:
+          - "(good night|goodnight|night night)"
+          - "(i'm |i am |)(going to |off to |)(bed|sleep)"
+          - "(sone ja raha hoon|sone jaa raha hoon|so raha hoon)"
+
+  JarvisAllOff:
+    data:
+      - sentences:
+          - "(turn|switch) (off |)everything[ off]"
+          - "(turn|switch) (it |)all off"
+          - "all off"
+          - "(sab|sab kuch) (band|bandh)( kar do| karo|)"
+          - "(i'm |i am |)(leaving|heading out|going out)"
+          - "shut (it |everything |)(all |)down"
+
+  # --- I'm home --------------------------------------------------------------
+  # Triggers lights on, wakes the PC, and speaks a weather + news greeting.
+  # Kept local (~40 ms) rather than letting the model handle it at ~2.5 s.
+  JarvisImHome:
+    data:
+      - sentences:
+          - "(i'm|i am|im) (back|home)"
+          - "(main|mains) (aaya|aa gaya|gaya|hoo|hun)"
+          - "(I am |)I'm (coming|back|home)"
+          - "(main |)ghar (pe|par) hoon"
+          - "I (just |)arrived"
+          - "I (have |)returned"
+          - "(welcome |)home"
+
+lists:
+  temperature:
+    range:
+      from: 16
+      to: 30
+  level:
+    range:
+      from: 1
+      to: 5

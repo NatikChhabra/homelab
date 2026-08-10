@@ -1,0 +1,389 @@
+# JARVIS voice-facing entities and scripts.
+#
+# Loaded as a Home Assistant "package" so it never collides with the UI-managed
+# automations.yaml / scripts.yaml.
+#
+# WHY THIS FILE EXISTS
+# The raw devices are not speakable. Tuya exposes the AC temperatures as fifteen
+# scenes literally named "16".."30", and the fan as seven more. Nobody says "run
+# scene 24". These wrappers give the conversation agent scripts with real
+# parameters, so ordinary speech works: "set the AC to 24", "fan speed 3",
+# "turn the AC off".
+#
+# TRANSPORT -- EVERYTHING IS LOCAL NOW
+#   Fan  -> NEC codes (address 0xF300) as raw base64 through remote.smart_ir.
+#   AC   -> full 10-byte Voltas frames, same path. See jarvis_ac_codes.yaml.
+#   TV   -> learned code, same path.
+#
+# The AC used to go through Tuya tap-to-run scenes because the blaster's study
+# buffer truncates an 80-bit Voltas frame (a capture returned 51 of 80 bits), so
+# it cannot LEARN one. It can still SEND one: the frames are synthesised from the
+# protocol spec instead of captured. The cloud scenes were abandoned after they
+# silently stopped delivering mid-session -- the scene fired in HA, its timestamp
+# updated, and the AC stayed on. Nothing here touches the internet.
+#
+# IR IS ONE-WAY. Nothing reports back, so the input_* helpers below hold what we
+# last COMMANDED, not what the appliance is actually doing. If someone uses a
+# physical remote, these go stale until the next command. That is a property of
+# infrared, not a bug to fix.
+
+input_boolean:
+  fan_power:
+    name: Fan power state
+    icon: mdi:fan
+  ac_power:
+    name: AC power state
+    icon: mdi:air-conditioner
+
+input_number:
+  fan_speed:
+    name: Fan speed state
+    min: 0
+    max: 5
+    step: 1
+    icon: mdi:fan-speed-3
+  fan_last_speed:
+    # The speed to return to when the fan is switched on with no speed given.
+    # Without this, turn_on used `max(current_speed, 3)`, so a fan sitting at 0
+    # always came back at speed 3 -- and a fan you had left on 1 came back on 3.
+    # That is the "why does it start at 3" bug. Only ever written with 1-5.
+    name: Fan last used speed
+    min: 1
+    max: 5
+    step: 1
+    initial: 3
+    icon: mdi:fan-clock
+  ac_temperature:
+    name: AC temperature state
+    min: 16
+    max: 30
+    step: 1
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer
+
+script:
+  # ---- Fan (local NEC over remote.smart_ir) -------------------------------
+  fan_set:
+    alias: Set fan speed
+    description: >-
+      Set the ceiling fan speed. level 0 turns it off, 1-5 are the speeds,
+      6 is boost. Use this for any fan speed request.
+    fields:
+      level:
+        description: "0 = off, 1 to 5 = speed, 6 = boost"
+        example: 3
+        selector:
+          number:
+            min: 0
+            max: 6
+    mode: single
+    sequence:
+      - variables:
+          codes:
+            "0": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwApoGMAIwAjACMAIwAjACMAKaBjACMAIwAjACMAKaBjACMAIwApoGMAKaBjACmgYwAjACMAKaBjACmgYwAjACMAI="
+            "1": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwApoGMAKaBjACMAIwApoGMAIwAjACMAIwAjACMAKaBjACMAIwAjACMAKaBjACMAIwApoGMAKaBjACmgYwAjACMAI="
+            "2": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwAjACMAIwAjACMAIwAjACMAKaBjACMAIwAjACMAKaBjACmgYwApoGMAKaBjACmgYwAjACMAKaBjACmgYwAjACMAI="
+            "3": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwAjACMAKaBjACMAIwApoGMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAKaBjACMAIwApoGMAKaBjACmgYwAjACMAI="
+            "4": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwApoGMAKaBjACMAIwAjACMAKaBjACMAIwAjACMAKaBjACMAIwAjACMAKaBjACmgYwAjACMAKaBjACmgYwAjACMAI="
+            "5": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwAjACMAIwAjACMAIwApoGMAIwAjACMAIwAjACMAKaBjACmgYwApoGMAKaBjACMAIwApoGMAKaBjACmgYwAjACMAI="
+            "6": "KCOUETACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAIwAjACMAKaBjACmgYwAjACMAIwAjACmgYwApoGMAKaBjACmgYwApoGMAKaBjACmgYwApoGMAIwAjACMAIwAjACMAKaBjACMAIwAjACMAIwAjACMAIwApoGMAKaBjACmgYwAjACMAI="
+      - action: remote.send_command
+        target:
+          entity_id: remote.smart_ir
+        data:
+          command: "b64:{{ codes[(level | int(0)) | string] }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.fan_speed
+        data:
+          value: "{{ [level | int(0), 5] | min }}"
+      # Remember the speed so turn_on restores it instead of guessing 3.
+      # Only 1-5 is a real speed; 0 is off and 6 is boost, neither of which
+      # should overwrite the remembered value.
+      - if:
+          - condition: template
+            value_template: "{{ 1 <= (level | int(0)) <= 5 }}"
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.fan_last_speed
+            data:
+              value: "{{ level | int(3) }}"
+      - action: "input_boolean.turn_{{ 'off' if (level | int(0)) == 0 else 'on' }}"
+        target:
+          entity_id: input_boolean.fan_power
+
+  # ---- Air conditioner (Tuya cloud scenes) -------------------------------
+  ac_set_temperature:
+    alias: Set AC temperature
+    description: >-
+      Set the air conditioner temperature in Celsius, 16 to 30. Also turns the
+      AC on. Use for any request to make the room warmer or cooler.
+    fields:
+      temperature:
+        description: "Target temperature in Celsius, 16 to 30"
+        example: 24
+        selector:
+          number:
+            min: 16
+            max: 30
+    mode: single
+    sequence:
+      # LOCAL now. Was a Tuya scene per degree ("16".."30"); those stopped
+      # delivering mid-session -- the scene fired in HA and the AC ignored it.
+      #
+      # The `int(24)` default is GONE and that is deliberate. It was the silent
+      # wrong-temperature bug: the model path (conversation.jarvis calls this
+      # script directly, bypassing the executor's REQUIRED_ARGS gate) can drop
+      # the temperature argument, and the old template then defaulted to 24 --
+      # "AC to 25, sir" while the room was set to 24. A missing temperature now
+      # stops the script with an error instead of silently acting. Loud beats
+      # wrong: the caller can retry, it cannot un-set 24.
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ temperature is defined and temperature is not none }}"
+            sequence:
+              - action: script.ac_apply
+                data:
+                  key: "{{ [[temperature | int, 16] | max, 30] | min }}"
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ac_temperature
+                data:
+                  value: "{{ [[temperature | int, 16] | max, 30] | min }}"
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.ac_power
+        default:
+          - stop: "Set AC temperature called without a temperature"
+            error: true
+
+  ac_on:
+    alias: Turn on the AC
+    description: Turn the air conditioner on at a comfortable temperature.
+    mode: single
+    sequence:
+      - action: script.ac_apply
+        data:
+          key: "24"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ac_temperature
+        data:
+          value: 24
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ac_power
+
+  ac_off:
+    alias: Turn off the AC
+    description: Turn the air conditioner off.
+    mode: single
+    sequence:
+      - action: script.ac_apply
+        data:
+          key: "off"
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ac_power
+
+  ac_max_cool:
+    alias: Maximum cooling
+    description: >-
+      Cool the room as fast as possible -- lowest temperature, highest fan,
+      turbo. Use for "max cooling", "cool it down fast", "it's boiling".
+    mode: single
+    sequence:
+      - action: script.ac_apply
+        data:
+          key: turbo
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ac_temperature
+        data:
+          value: 16
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ac_power
+
+  ac_dry:
+    alias: AC dry mode
+    description: >-
+      Put the AC in dry / dehumidify mode. Use for "dry mode", "it's humid",
+      "dehumidify", or when the user mentions the water droplet setting.
+    mode: single
+    sequence:
+      - action: script.ac_apply
+        data:
+          key: dry
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ac_power
+
+  # Boost needs its own script: HA's fan percentage has only 5 steps, so boost
+  # and speed 5 both read as 100% and the model cannot tell them apart. The IR
+  # code is genuinely different (0x708F vs 0x7788).
+  fan_boost:
+    alias: Fan boost
+    description: >-
+      Put the fan on boost / turbo -- the highest setting, above speed 5. Use
+      for "boost the fan", "fan turbo", "fan full blast".
+    mode: single
+    sequence:
+      - action: script.fan_set
+        data:
+          level: 6
+
+# ---- Comfort scenes: whole-room, common-sense actions -------------------
+# These exist so the model can satisfy a FEELING in one tool call instead of
+# reasoning out three separate ones. A 3B model chains tool calls unreliably;
+# one script that does the right thing is far more robust than hoping it calls
+# fan + AC + lights in sequence.
+  feeling_hot:
+    alias: I am feeling hot
+    description: >-
+      Cool the room down. Use when the user says they are hot, warm, sweating,
+      "garmi", "it's too hot", or asks to make the room cooler without naming a
+      device.
+    mode: single
+    sequence:
+      - action: script.ac_set_temperature
+        data:
+          temperature: 22
+      - action: script.fan_set
+        data:
+          level: 4
+
+  feeling_cold:
+    alias: I am feeling cold
+    description: >-
+      Warm the room up. Use when the user says they are cold, chilly, shivering,
+      "thand", or asks to make the room warmer without naming a device.
+    mode: single
+    sequence:
+      - action: script.ac_set_temperature
+        data:
+          temperature: 27
+      - action: script.fan_set
+        data:
+          level: 2
+
+  good_night:
+    alias: Good night
+    description: >-
+      Bedtime. Turns the lights off, sets a comfortable sleeping temperature and
+      a quiet fan speed. Use for "good night", "I'm going to sleep", "sone ja
+      raha hoon", "bedtime".
+    mode: single
+    sequence:
+      - action: light.turn_off
+        target:
+          entity_id:
+            - light.node_switch_gang_1
+            - light.node_switch_gang_2
+            - light.node_switch_gang_3
+      - action: script.ac_set_temperature
+        data:
+          temperature: 25
+      - action: script.fan_set
+        data:
+          level: 2
+
+  movie_time:
+    alias: Movie time
+    description: >-
+      Movie or gaming mode. Turns the TV on, dims the room by turning most
+      lights off, and sets a comfortable temperature. Use for "movie time",
+      "let's watch something", "gaming".
+    mode: single
+    sequence:
+      - action: script.tv_toggle
+      - action: light.turn_off
+        target:
+          entity_id:
+            - light.node_switch_gang_1
+            - light.node_switch_gang_2
+      - action: script.ac_set_temperature
+        data:
+          temperature: 24
+
+  all_off:
+    alias: Turn everything off
+    description: >-
+      Shut the whole room down -- every light, the fan and the AC. Use for
+      "turn everything off", "shut it all down", "I'm leaving", "sab band kar do".
+    mode: single
+    sequence:
+      - action: light.turn_off
+        target:
+          entity_id:
+            - light.node_switch_gang_1
+            - light.node_switch_gang_2
+            - light.node_switch_gang_3
+      - action: script.fan_set
+        data:
+          level: 0
+      - action: script.ac_off
+
+  # ---- I'm home -----------------------------------------------------------
+  im_home:
+    alias: I'm home
+    description: >-
+      Welcome home scene. Turns on the bedroom lights and sets a comfortable
+      temperature. Use for "I'm home", "I'm back", "main aaya", "I'm back home".
+    mode: single
+    sequence:
+      - action: light.turn_on
+        target:
+          area_id: bedroom
+      - action: script.ac_set_temperature
+        data:
+          temperature: 24
+      - action: script.fan_set
+        data:
+          level: 2
+
+  # ---- TV / monitor (Tuya cloud scene) -----------------------------------
+  tv_toggle:
+    alias: Toggle the TV
+    description: >-
+      Turn the TV or monitor on or off. The remote uses ONE button for both, so
+      this always toggles -- there is no separate on and off. Use it for any
+      request to turn the TV on or off.
+    mode: single
+    sequence:
+      - action: scene.turn_on
+        target:
+          entity_id: scene.monitor_tv_on_and_off
+
+# Template fan so "turn on the fan" / "fan to 60%" work as a normal HA fan,
+# on top of the local NEC codes above.
+#
+# NOTE: this must live under the modern `template:` key, NOT `fan: platform:
+# template`. The legacy schema is rejected outright by current Home Assistant:
+#   "Configuring the template integration under the fan platform key is not
+#    supported, it must be configured under its own template key instead"
+# and the entity simply never appears.
+template:
+  - fan:
+      - name: "Fan"
+        unique_id: jarvis_bedroom_fan
+        state: "{{ states('input_boolean.fan_power') }}"
+        percentage: "{{ states('input_number.fan_speed') | int(0) * 20 }}"
+        speed_count: 5
+        turn_on:
+          # Restore the last real speed, not a hardcoded guess.
+          - action: script.fan_set
+            data:
+              level: "{{ states('input_number.fan_last_speed') | int(3) }}"
+        turn_off:
+          - action: script.fan_set
+            data:
+              level: 0
+        set_percentage:
+          - action: script.fan_set
+            data:
+              level: >-
+                {{ 0 if (percentage | int(0)) == 0
+                   else [(((percentage | int(0)) + 19) / 20) | int, 5] | min }}
