@@ -846,6 +846,10 @@ async def _ollama_keepalive_forever(session: aiohttp.ClientSession) -> None:
     Without this, the model is evicted after ~5 min idle and the first user
     request pays a 5-8 s cold-start penalty. With it, the model stays warm
     and Hermes responds in 500-2000 ms every time.
+
+    NOTE: /api/ps is unreliable on this hardware — it returns empty models
+    list even when qwen2.5:3b is resident and answering. So we ALWAYS send
+    a lightweight ping rather than skipping on the ps check.
     """
     if not ROUTER._hermes:
         return
@@ -853,20 +857,12 @@ async def _ollama_keepalive_forever(session: aiohttp.ClientSession) -> None:
     while True:
         await asyncio.sleep(_OLLAMA_KEEPALIVE_INTERVAL_S)
         try:
-            # Step 1: check if model is already loaded (fast, ~5ms).
-            async with session.get(
-                f"{ollama_url}/api/ps",
-                timeout=aiohttp.ClientTimeout(total=3),
-            ) as resp:
-                data = await resp.json()
-                if data.get("models"):
-                    log.debug("Ollama keep-alive: model already resident, skip")
-                    continue
-            # Step 2: model was evicted — reload it with generous timeout.
+            # Send a real ping to keep the model warm. This is the only
+            # reliable way — /api/ps lies about eviction on WDDM.
             t0 = time.perf_counter()
             await ROUTER._hermes.ask(session, "ping", specialist="chat")
             dt = (time.perf_counter() - t0) * 1000
-            log.info("Ollama keep-alive: model reloaded in %.0f ms", dt)
+            log.debug("Ollama keep-alive: %.0f ms", dt)
         except Exception as exc:  # noqa: BLE001
             log.warning("Ollama keep-alive failed: %s", exc)
 
