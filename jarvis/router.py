@@ -231,7 +231,7 @@ class IntentRouter:
                 self._hermes = Hermes()
                 self._executor = Executor(self.hass_url, self.token)
                 self._classify = classify
-                _read_tools = {"wa_read", "pc_status", "GetLiveContext"}
+                _read_tools = {"wa_read", "pc_status", "GetLiveContext", "server_status"}
                 self._read_tools = set(_read_tools)
                 self._readers = {
                     n for n, s in SPECIALISTS.items()

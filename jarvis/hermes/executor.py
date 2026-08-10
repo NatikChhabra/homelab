@@ -118,6 +118,12 @@ REQUIRED_ARGS: dict[str, set[str]] = {
 # was measured against the PC agent, not assumed.
 PC_URL = os.getenv("JARVIS_PC_URL", "http://host.docker.internal:8099").rstrip("/")
 WA_URL = os.getenv("JARVIS_WA_URL", "http://host.docker.internal:8097").rstrip("/")
+# Web search service. The ONLY outbound internet path in this build.
+# JARVIS_WEBSEARCH_ENABLED=0 disables all outbound traffic at the top of the
+# handler, before DNS, before a socket.
+SEARCH_URL = os.getenv("JARVIS_SEARCH_URL", "http://jarvis-websearch:3101").rstrip("/")
+# Capabilities server on the host (Glances proxy + audit report).
+CAPABILITIES_URL = os.getenv("JARVIS_CAPABILITIES_URL", "http://host.docker.internal:3102").rstrip("/")
 
 # The PC agent accepts either token name, preferring the specific one. Falling
 # back to the WOL token is not sloppiness: pc-agent.ps1 replaced wol-helper.ps1
@@ -220,11 +226,39 @@ def _wa_route(tool: str, args: dict[str, Any]) -> tuple[str, str, dict[str, Any]
     return f"no route for {tool!r}"
 
 
+def _search_route(tool: str, args: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | str:
+    """Map a web search tool onto the websearch service."""
+    if tool == "web_search":
+        q = str(args.get("query") or "").strip()
+        if not q:
+            return "no search query given"
+        if len(q) > 300:
+            return "search query too long"
+        return ("POST", "/search", {"q": q})
+    if tool == "web_fetch":
+        url = str(args.get("url") or "").strip()
+        if not url:
+            return "no URL given"
+        if not url.startswith(("http://", "https://")):
+            return f"invalid URL: {url!r}"
+        return ("GET", f"/fetch?url={url}", {})
+    return f"no route for {tool!r}"
+
+
+def _capabilities_route(tool: str, args: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | str:
+    """Map a server status tool onto the capabilities service."""
+    if tool == "server_status":
+        return ("GET", "/api/status", {})
+    return f"no route for {tool!r}"
+
+
 # tool -> which host service dispatches it
 HTTP_ROUTES: dict[str, str] = {
     "pc_power": "pc", "pc_media": "pc", "pc_set_volume": "pc",
     "pc_app": "pc", "pc_type": "pc", "pc_status": "pc",
     "wa_send": "wa", "wa_read": "wa",
+    "web_search": "search", "web_fetch": "search",
+    "server_status": "capabilities",
 }
 
 
@@ -309,6 +343,49 @@ def _describe(tool: str, payload: dict[str, Any] | None) -> str:
             body += f"; {others} other sender{'s' if others > 1 else ''} messaged too"
         ending = "" if body.endswith(("?", "!", "...")) else "."
         return f"{newest} said: {body}{ending}"
+
+    if tool == "web_search":
+        if not isinstance(payload, dict):
+            return ""
+        answer = payload.get("answer") or ""
+        if answer:
+            return answer
+        error = payload.get("error") or ""
+        if error:
+            return f"Search failed: {error}"
+        return ""
+
+    if tool == "web_fetch":
+        if not isinstance(payload, dict):
+            return ""
+        answer = payload.get("answer") or ""
+        if answer:
+            return answer
+        return ""
+
+    if tool == "server_status":
+        if not isinstance(payload, dict):
+            return ""
+        # Capabilities /api/status returns structured server health.
+        # Build a grounded one-liner from the real data.
+        containers = payload.get("containers") or {}
+        total = containers.get("total") or 0
+        running = containers.get("running") or 0
+        unhealthy = containers.get("unhealthy") or []
+        cpu = containers.get("cpu") or {}
+        mem = containers.get("mem") or {}
+        parts = []
+        if total:
+            parts.append(f"{running} of {total} containers running")
+        if unhealthy:
+            parts.append(f"{len(unhealthy)} unhealthy: {', '.join(str(u) for u in unhealthy[:2])}")
+        if isinstance(cpu, dict) and cpu.get("percent"):
+            parts.append(f"CPU at {cpu['percent']:.0f}%")
+        if isinstance(mem, dict) and mem.get("percent"):
+            parts.append(f"memory at {mem['percent']:.0f}%")
+        if not parts:
+            return "Server is up."
+        return ". ".join(parts) + "."
 
     return ""
 
@@ -414,6 +491,11 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
         return "WhatsApp is not linked yet, so I cannot read your messages."
     if tool == "pc_app" and err in ("app_not_allowed", "not_allowed"):
         return "That application is not on the allowed list."
+
+    if tool == "web_search" and err == "disabled":
+        return "Internet search is not available right now."
+    if tool == "web_fetch" and err == "disabled":
+        return "Web fetching is not available right now."
 
     # Transport-level problems, common to both services. "unreachable" is worth
     # saying out loud: a host service being down is something Natik can fix, and
@@ -643,23 +725,31 @@ class Executor:
                     f"{tool} needs {', '.join(missing)}; dispatch refused",
                     notes)
 
-        # --- host HTTP services (PC agent, WhatsApp bridge) -----------------
+        # --- host HTTP services (PC agent, WhatsApp bridge, websearch, capabilities)
         if tool in HTTP_ROUTES:
             which = HTTP_ROUTES[tool]
-            base, token = (PC_URL, PC_TOKEN) if which == "pc" else (WA_URL, WA_TOKEN)
-            if not token:
+            if which == "pc":
+                base, token = PC_URL, PC_TOKEN
+                route = _pc_route(tool, clean)
+            elif which == "wa":
+                base, token = WA_URL, WA_TOKEN
+                route = _wa_route(tool, clean)
+            elif which == "search":
+                base, token = SEARCH_URL, ""
+                route = _search_route(tool, clean)
+            elif which == "capabilities":
+                base, token = CAPABILITIES_URL, ""
+                route = _capabilities_route(tool, clean)
+            else:
+                return done(False, f"unknown service {which!r}")
+            if not token and which in ("pc", "wa"):
                 # Fail loudly. A missing token used to surface as a 401 that the
                 # model then narrated around, which is the failure this whole
-                # file exists to prevent.
+                # file exists to prevent. Search and capabilities are internal
+                # services on the Docker network, no token needed.
                 return done(False, f"{which} token is not configured in this container")
-            route = _pc_route(tool, clean) if which == "pc" else _wa_route(tool, clean)
             if isinstance(route, str):
-                # A route-string is a REFUSAL, not an unexplained failure. Ask
-                # _describe_failure for words: that is what turns "shutdown
-                # needs explicit confirmation" into speech. Without it the
-                # router falls through to the big agent, which holds pc_power
-                # and would narrate a shutdown that was refused -- then could
-                # dispatch it.
+                # A route-string is a REFUSAL, not an unexplained failure.
                 return ExecResult(tool, False, route, notes,
                                   round((time.perf_counter() - started) * 1000, 1),
                                   _describe_failure(tool, None, route))
