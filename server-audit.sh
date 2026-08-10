@@ -1655,6 +1655,7 @@ for t in sorted(H.TOOLS):
     if t in E.INTENT_TOOLS: kind='intent'
     elif t in E.CONTEXT_TOOLS: kind='context'
     elif t in E.HTTP_ROUTES: kind='http:'+E.HTTP_ROUTES[t]
+    elif hasattr(E, 'CALL_TOOLS') and t in E.CALL_TOOLS: kind='call'
     else: kind='script'
     print(t, kind)
 " 2>/dev/null)
@@ -1670,7 +1671,7 @@ for t in sorted(H.TOOLS):
       [ -n "$_tool" ] || continue
       _n=$((_n+1))
       case "$_kind" in
-        intent|context) : ;;
+        intent|context|call) : ;;
         http:*) : ;;   # liveness of those services is checked below and in 23
         script)
           # An empty script list means HA or the token is broken, not that every

@@ -295,6 +295,28 @@ TOOLS: dict[str, dict] = {
         "server_status",
         "Read the home server status: Docker container health, CPU, memory, disk. Use when asked about the server, 'server status', 'how is the server', 'container health'.",
         _NONE),
+
+    # --- Phone calls ---------------------------------------------------------
+    # These reach call_bridge.py on the host. The bridge uses Windows HFP
+    # (Hands-Free Profile) over Bluetooth — the phone dials on its own SIM,
+    # Windows routes audio. Numbers never touch JARVIS; only contact NAMES do.
+    "call_make": _tool(
+        "call_make",
+        "Place a call to one of Natik's saved contacts by NAME. Use for 'call mum', 'ring dad', 'call home'. Never a phone number.",
+        {
+            "type": "object",
+            "properties": {
+                "contact": {"type": "string",
+                            "description": "Contact NAME only, e.g. 'mum', 'dad', 'home'. Never a phone number."},
+            },
+            "required": ["contact"],
+        }),
+    "call_answer": _tool("call_answer", "Answer an incoming phone call.", _NONE),
+    "call_reject": _tool("call_reject", "Reject an incoming phone call.", _NONE),
+    "call_state": _tool(
+        "call_state",
+        "Read the current phone call state: who is calling, is the phone connected, are there active calls. Use when asked 'who is calling', 'is there a call', 'call status'.",
+        _NONE),
 }
 
 
@@ -489,6 +511,25 @@ SPECIALISTS: dict[str, Specialist] = {
                   "what's the", "when is", "where is", "why did", "how much"],
         negative=["light", "lights", "fan", "ac", "air conditioner", "tv",
                   "movie", "whatsapp", "message", "pc", "computer", "laptop"],
+    ),
+    # --- Comms: calls and messaging ------------------------------------------
+    # WhatsApp (wa_send, wa_read) and phone calls (call_make, call_answer,
+    # call_reject, call_state) are grouped because they share the same
+    # negative-list logic: "type" routes to PC (pc_type), not WhatsApp.
+    "comms": Specialist(
+        name="comms",
+        tools=["wa_send", "wa_read", "call_make", "call_answer", "call_reject", "call_state"],
+        role="You send WhatsApp messages, read messages, and handle phone calls. You control no devices in this room.",
+        keywords=["whatsapp", "message", "messages", "msg", "text her", "text him",
+                  "text mum", "text dad", "send", "reply", "unread", "bhej",
+                  "bhejo", "sandesh", "who messaged", "any messages",
+                  "text me", "texted", "texts", "anyone text", "notify",
+                  "send whatsapp", "whatsapp message",
+                  # Call keywords.
+                  "call", "calling", "caller", "ring", "ringing", "incoming",
+                  "answer", "reject", "hang up", "call status", "who is calling",
+                  "phone call", "place a call"],
+        negative=["type", "typing", "light", "fan", "ac", "volume"],
     ),
     # The talker. Zero tools by design. "what's the weather", "tell me a joke"
     # and "who are you" used to fall through to comfort's 6 tools, where the

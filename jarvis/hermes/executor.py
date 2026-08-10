@@ -53,6 +53,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -124,6 +125,9 @@ WA_URL = os.getenv("JARVIS_WA_URL", "http://host.docker.internal:8097").rstrip("
 SEARCH_URL = os.getenv("JARVIS_SEARCH_URL", "http://jarvis-websearch:3101").rstrip("/")
 # Capabilities server on the host (Glances proxy + audit report).
 CAPABILITIES_URL = os.getenv("JARVIS_CAPABILITIES_URL", "http://host.docker.internal:3102").rstrip("/")
+# Call bridge HTTP API on the host. The real call_bridge.py needs numpy +
+# audio hardware, so this wraps it in a thin HTTP server on port 8098.
+CALL_URL = os.getenv("JARVIS_CALL_URL", "http://host.docker.internal:8098").rstrip("/")
 
 # The PC agent accepts either token name, preferring the specific one. Falling
 # back to the WOL token is not sloppiness: pc-agent.ps1 replaced wol-helper.ps1
@@ -248,7 +252,23 @@ def _search_route(tool: str, args: dict[str, Any]) -> tuple[str, str, dict[str, 
 def _capabilities_route(tool: str, args: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | str:
     """Map a server status tool onto the capabilities service."""
     if tool == "server_status":
-        return ("GET", "/api/status", {})
+        return ("POST", "/api/status", {})
+    return f"no route for {tool!r}"
+
+
+def _call_route(tool: str, args: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | str:
+    """Map a call tool onto call_bridge.py via subprocess."""
+    if tool == "call_make":
+        contact = str(args.get("contact") or "").strip()
+        if not contact:
+            return "no contact given"
+        return ("CALL", "make", {"contact": contact})
+    if tool == "call_answer":
+        return ("CALL", "answer", {})
+    if tool == "call_reject":
+        return ("CALL", "reject", {})
+    if tool == "call_state":
+        return ("CALL", "state", {})
     return f"no route for {tool!r}"
 
 
@@ -260,6 +280,9 @@ HTTP_ROUTES: dict[str, str] = {
     "web_search": "search", "web_fetch": "search",
     "server_status": "capabilities",
 }
+# Call tools use subprocess, not HTTP. Kept separate so they bypass the
+# HTTP dispatch block and go straight to _run_call.
+CALL_TOOLS = frozenset({"call_make", "call_answer", "call_reject", "call_state"})
 
 
 def _clip_text(text: str, limit: int = 120) -> str:
@@ -740,6 +763,9 @@ class Executor:
             elif which == "capabilities":
                 base, token = CAPABILITIES_URL, ""
                 route = _capabilities_route(tool, clean)
+            elif which == "call":
+                base, token = "", ""
+                route = _call_route(tool, clean)
             else:
                 return done(False, f"unknown service {which!r}")
             if not token and which in ("pc", "wa"):
@@ -762,6 +788,10 @@ class Executor:
             return ExecResult(tool, ok, detail, notes,
                               round((time.perf_counter() - started) * 1000, 1), spoken)
 
+        # --- call tools: HTTP to call bridge wrapper ------------------------
+        if tool in CALL_TOOLS:
+            return await self._run_call(session, tool, clean)
+
         if tool in INTENT_TOOLS:
             data = {k: v for k, v in clean.items() if v not in (None, "")}
             ok, detail = await self._post(
@@ -773,6 +803,50 @@ class Executor:
         ok, detail = await self._post(
             session, f"/api/services/script/{tool}", clean)
         return done(ok, detail, notes)
+
+    async def _run_call(self, session: aiohttp.ClientSession,
+                        tool: str, args: dict[str, Any]) -> ExecResult:
+        """Dispatch a call tool via the host call bridge HTTP API."""
+        started = time.perf_counter()
+        def done(ok, detail, speech="") -> ExecResult:
+            return ExecResult(tool, ok, detail, [],
+                              round((time.perf_counter() - started) * 1000, 1), speech)
+
+        if tool == "call_make":
+            contact = str(args.get("contact") or "").strip()
+            if not contact:
+                return done(False, "no contact given")
+            path = "/call/make"
+            body = {"contact": contact}
+        elif tool == "call_answer":
+            path = "/call/answer"
+            body = {}
+        elif tool == "call_reject":
+            path = "/call/reject"
+            body = {}
+        elif tool == "call_state":
+            path = "/call/state"
+            body = {}
+        else:
+            return done(False, f"unknown call tool {tool!r}")
+
+        try:
+            async with session.post(
+                f"{CALL_URL}{path}", json=body,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                text = await resp.text()
+                try:
+                    payload = json.loads(text) if text else {}
+                except json.JSONDecodeError:
+                    payload = {"raw": text}
+                ok = resp.status == 200 and payload.get("ok") is not True
+                detail = payload.get("error") or (f"http {resp.status}" if resp.status != 200 else "ok")
+                speech = payload.get("speech") or payload.get("state", "") or ""
+                return ExecResult(tool, not ok, detail, [],
+                                  round((time.perf_counter() - started) * 1000, 1), speech)
+        except Exception as exc:  # noqa: BLE001
+            return done(False, f"{type(exc).__name__}: {exc}")
 
     async def run(self, session: aiohttp.ClientSession,
                   calls: list[dict[str, Any]]) -> list[ExecResult]:
