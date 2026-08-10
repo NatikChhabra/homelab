@@ -61,10 +61,12 @@ log = logging.getLogger("jarvis.hermes")
 
 OLLAMA_URL = "http://jarvis-ollama:11434"
 MODEL = "qwen2.5:3b"
-# 4096, halved from 8192. Hermes sends only system (~700 tokens) + user, no
-# history, so the happy-path cost is unchanged while ~200MB of VRAM is freed on
-# the 4GB card -- room that matters when Ollama and Whisper share it.
-NUM_CTX = 4096
+# 2048, quartered from 8192. Hermes sends only system (~700 tokens) + user, no
+# history, so the happy-path cost is unchanged while ~600MB of VRAM is freed
+# on the 4GB RTX 3050 where Ollama, Whisper CUDA, and Kokoro CUDA all share
+# the same memory pool. Without this, Ollama's model gets evicted every few
+# minutes and the first user command pays a 5-8s cold-start penalty.
+NUM_CTX = 2048
 
 # num_predict is a HARD CAP on ALL generated tokens, the tool-call JSON
 # included. Actuation commands measure a max of 48 out-tokens, so 150 is ~3x

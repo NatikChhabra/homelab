@@ -164,25 +164,17 @@ class IntentRouter:
         token: str,
         local_agent: str = "conversation.home_assistant",
         llm_agent: str = "conversation.jarvis",
-        # 2.5s, down from 5.0. The local matcher either answers in <100ms or not
-        # at all -- a 5s wait on a miss cost more than the Hermes tier it
-        # preceded. Verified 2026-08-09.
-        local_timeout_s: float = 2.5,
-        # 15s, down from 60. The LLM agent measured 750-5600ms per turn; a
-        # healthy call finishes in ~6s, so 60s only delayed honest failure
-        # (unreachable Ollama, a hung prompt) by a full minute. Matches the
-        # executor's own 15s tool timeout.
+        # 5s: local matcher usually answers in <100ms but HA can take 2-3s
+        # after a cold restart or when intent scripts are heavy (movie_time).
+        # A 2.5s timeout was causing false "timeout" errors on these.
+        local_timeout_s: float = 5.0,
+        # 15s for the LLM agent (conversation.jarvis via Ollama).
         llm_timeout_s: float = 15.0,
-        # Aggregate cap for the whole turn. voice_server.py awaits process()
-        # inline, so without this a cold/hung Hermes call plus sequential tool
-        # reads can freeze the voice loop for a minute or more.
-        #
-        # 25s was live and caused "I took too long to process that" on simple
-        # commands that local could have handled instantly but router waited out.
-        # Dropped to 8s: local path (≤2.5s) + Hermes (≤15s, usually <2s) + LLM
-        # (≤6s). Anything slower than 8s is genuinely broken and should fail
-        # fast so the user retries rather than sitting in silence.
-        turn_timeout_s: float = 8.0,
+        # Aggregate cap for the whole turn. Set to 25s to accommodate the
+        # Ollama cold-start reload (~15s) that happens when the GPU driver
+        # evicts the model on the 4GB RTX 3050. Without this, every
+        # Hermes-path command fails with "I took too long" on first use.
+        turn_timeout_s: float = 25.0,
         enabled: bool = True,
         hermes_enabled: bool | None = None,
     ) -> None:
@@ -478,6 +470,28 @@ class IntentRouter:
         n_calls = 0
         hermes_reason = "disabled" if not self.hermes_enabled else ""
         if self.hermes_enabled and self._hermes and self._executor:
+            # Proactive model reload: on the 4GB RTX 3050 with WDDM, the GPU
+            # driver evicts Ollama's CUDA model after ~2 min idle despite
+            # OLLAMA_KEEP_ALIVE=-1. Detect eviction and reload only if there
+            # is enough time budget left. The reload takes ~15s; the
+            # turn_timeout is 8s. If local already used >2s, skip the reload
+            # and let Hermes try directly (it will either work fast if model
+            # happened to reload, or fail with a clear timeout error).
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            if elapsed_ms < 2000:
+                try:
+                    async with session.get(
+                        f"{self._hermes.ollama_url}/api/ps",
+                        timeout=aiohttp.ClientTimeout(total=2),
+                    ) as resp:
+                        ps = await resp.json()
+                        if not ps.get("models"):
+                            log.info("Ollama model evicted, reloading before Hermes...")
+                            t_warm = time.perf_counter()
+                            await self._hermes.ask(session, "warmup", specialist="chat")
+                            log.info("Ollama reloaded in %.0f ms", (time.perf_counter() - t_warm) * 1000)
+                except Exception:  # noqa: BLE001 - best effort, don't block the turn
+                    pass
             # Questions are normally the big agent's job, because a specialist
             # holds only actuation tools and would answer from its own head.
             #
