@@ -1,0 +1,15 @@
+secrets.env
+*.db
+*.log
+
+# Tailscale certs. `tailscale cert <domain>` writes the cert AND PRIVATE KEY into
+# the current working directory with no prompt -- on 2026-08-08 that dropped a
+# private key straight into this folder, which is staged for a PUBLIC repo.
+# Never commit these; regenerate with `tailscale cert` if one is ever needed.
+*.key
+*.crt
+*.pem
+*ts.net*
+tuya-watchdog-state.json
+__pycache__/
+*.pyc

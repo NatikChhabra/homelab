@@ -231,7 +231,7 @@ class IntentRouter:
                 self._hermes = Hermes()
                 self._executor = Executor(self.hass_url, self.token)
                 self._classify = classify
-                _read_tools = {"wa_read", "pc_status", "GetLiveContext", "server_status"}
+                _read_tools = {"wa_read", "pc_status", "GetLiveContext", "server_status", "call_state"}
                 self._read_tools = set(_read_tools)
                 self._readers = {
                     n for n, s in SPECIALISTS.items()
@@ -388,7 +388,7 @@ class IntentRouter:
             r"are\s+you\s+there|you\s+there|hey\s+jarvis|hello\s+jarvis|"
             r"are\s+you\s+awake|is\s+anyone\s+there|is\s+this\s+on|are\s+you\s+on|"
             r"what'?s\s+up|whats\s+up|what\s+is\s+up|how\s+are\s+you|how\s+do\s+you\s+do|"
-            r"test\s+(?:1|2|one|two)|ping|status\s+check)\s*\??\s*$",
+            r"test\s+(?:1|2|one|two)|ping|status\s+check)\s*(?:,?\s*jarvis)?\s*\??\s*$",
             re.I,
         )
         _GREETING_REPLY = {

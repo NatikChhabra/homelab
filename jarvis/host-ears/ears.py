@@ -75,6 +75,10 @@ WAKE_PORT = int(os.getenv("WAKE_PORT", "10400"))
 WHISPER_HOST = os.getenv("WHISPER_HOST", "localhost")
 WHISPER_PORT = int(os.getenv("WHISPER_PORT", "10300"))
 WAKE_WORD = os.getenv("WAKE_WORD", "hey_jarvis")
+# HA URL for the router fallback path. Docker Desktop on Windows uses
+# host.docker.internal to reach the host from inside a container, but ears.py
+# runs on the HOST, so localhost is correct here.
+HASS_URL = os.getenv("JARVIS_HASS_URL", "http://localhost:8123")
 
 # Acknowledgment sound played when wake word is detected.
 # Options: jarvis_online (rising sweep), ready (double beep),

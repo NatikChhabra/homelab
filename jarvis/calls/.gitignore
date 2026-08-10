@@ -1,0 +1,8 @@
+# Real contact numbers must never reach the repo.
+contacts.json
+
+# Local bridge secret, if it is ever written beside the code by mistake.
+bridge-secret.txt
+
+# Runtime logs from the call bridge.
+*.log
