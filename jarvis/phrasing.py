@@ -186,9 +186,12 @@ _rule(r"^(?:lights?)\s+(?:band|bandh|off)(?:\s+kar(?:o|\s+do)?)?$",
 # the rewritten form; bare "ac 22" also routes through this path.
 _rule(r"^ac\s+(\d{1,2})(?:\s*(?:kar\s+do|karo|rakh\s+do|rakh\s+de))?\s*$",
       lambda m: f"set the ac to {m.group(1)}", "ac N kar do")
-# "set ac N" -> canonical form the parser accepts
-_rule(r"^set\s+ac\s+(\d{1,2})\s*$",
+# "set ac N" / "set the ac to N" / "set ac to N" -> canonical form the parser accepts
+_rule(r"^set\s+(?:the\s+)?ac\s+(?:to\s+)?(\d{1,2})\s*$",
       lambda m: f"set the ac to {m.group(1)}", "set ac N -> set the ac to N")
+# "N degrees" (expanded from "twenty four degrees") → set AC
+_rule(r"^(\d{1,2})\s+degrees?$",
+      lambda m: f"set the ac to {m.group(1)}", "N degrees -> set ac to N")
 
 # AC word-order fix: "turn the AC on/off" -> "turn on/off the AC"
 # Bare "ac on/off" and Hinglish "ac chalu/band" already work locally.
@@ -312,6 +315,11 @@ def _pre_normalize(text: str) -> str:
     Handles typos like "to60", "speed3", "ac22", "turnon", "onthe", "setac24".
     Safe because it only touches obvious fusion points, never invents words.
     """
+    # Strip wake word variants that Whisper mishears. "Hey Jarvis" becomes
+    # "In Javas", "In Java", "Hey Javas", etc. These must be removed BEFORE
+    # any other processing so the actual command reaches the local parser.
+    # Case-insensitive to catch "In Javas", "Hey Javas", "jarvis" etc.
+    text = re.sub(r"^(?:in\s+javas?|hey\s+javas?|jarvis)\s*[,.]?\s*", "", text, flags=re.I)
     # Fully fused commands FIRST (before generic number-splitting)
     # \b after digits: digit is \w, so \b matches at end-of-string or before \W.
     # Prevents "setac24please" from being rewritten (trailing text = model decides).
@@ -334,6 +342,50 @@ def _pre_normalize(text: str) -> str:
     return text
 
 
+# --- word-to-number expansion -----------------------------------------------
+# Whisper often mishears small numbers, especially through a laptop mic at
+# distance: "twenty one" → "twenty seven", "fan speed one" → "fan speed four".
+# This map converts spoken word-numbers to digits for AC temperatures and fan
+# speeds. Applied ONLY when preceded by a context keyword (set, ac, fan, speed,
+# degrees) to avoid mangling conversational text like "one day" or "two people".
+_WORD_TO_NUM = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+    "eighteen": "18", "nineteen": "19", "twenty": "20",
+    "twenty one": "21", "twenty two": "22", "twenty three": "23",
+    "twenty four": "24", "twenty five": "25", "twenty six": "26",
+    "twenty seven": "27", "twenty eight": "28", "twenty nine": "29",
+    "thirty": "30",
+}
+
+# Context keywords that signal a number is a temperature, speed, or level.
+# Matches: "set ac twenty four", "set the ac to twenty four", "ac twenty two",
+# "fan speed three", "set fan speed to five", "twenty four degrees", etc.
+_NUMBER_CONTEXT = re.compile(
+    r"(?:set\s+(?:the\s+)?(?:ac|a\s?c|air\s*con|fan|temperature|temp|speed|level)"
+    r"|(?:ac|a\s?c|air\s*con|fan)\s+(?:to|at|on|level|speed)?"
+    r"|to\s+(?:set\s+)?(?:the\s+)?(?:ac|a\s?c|fan)"
+    r"|(?:temperature|temp|speed|level|degrees)[a-z\s]*$)",
+    re.I,
+)
+
+
+def _expand_word_numbers(text: str) -> str:
+    """Convert spoken word-numbers to digits in AC/fan/speed context.
+
+    Only converts when a number keyword follows a context word (set, ac, fan,
+    speed, degrees). This prevents mangling conversational text.
+    """
+    if not _NUMBER_CONTEXT.search(text):
+        return text
+    # Sort by length (longest first) so "twenty four" matches before "twenty"
+    for word, digit in sorted(_WORD_TO_NUM.items(), key=lambda x: -len(x[0])):
+        text = re.sub(r"\b" + word + r"\b", digit, text, flags=re.I)
+    return text
+
+
 def normalise(text: str) -> tuple[str, str]:
     """
     Return (rewritten_text, rule_reason). reason is "" when nothing matched.
@@ -349,6 +401,7 @@ def normalise(text: str) -> tuple[str, str]:
     if text.strip().endswith("?"):
         return text, ""
     cleaned = _pre_normalize(text.strip().rstrip(".!?"))
+    cleaned = _expand_word_numbers(cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     if not cleaned:
         return text, ""

@@ -164,17 +164,16 @@ class IntentRouter:
         token: str,
         local_agent: str = "conversation.home_assistant",
         llm_agent: str = "conversation.jarvis",
-        # 5s: local matcher usually answers in <100ms but HA can take 2-3s
+        # 3s: local matcher usually answers in <100ms but HA can take 2-3s
         # after a cold restart or when intent scripts are heavy (movie_time).
-        # A 2.5s timeout was causing false "timeout" errors on these.
-        local_timeout_s: float = 5.0,
-        # 15s for the LLM agent (conversation.jarvis via Ollama).
-        llm_timeout_s: float = 15.0,
-        # Aggregate cap for the whole turn. Set to 25s to accommodate the
-        # Ollama cold-start reload (~15s) that happens when the GPU driver
-        # evicts the model on the 4GB RTX 3050. Without this, every
-        # Hermes-path command fails with "I took too long" on first use.
-        turn_timeout_s: float = 25.0,
+        local_timeout_s: float = 3.0,
+        # 10s for the LLM agent (conversation.jarvis via Ollama).
+        llm_timeout_s: float = 10.0,
+        # 15s aggregate: local(3s) + Hermes(5-8s when model loaded) + buffer.
+        # When model is evicted, Hermes will timeout at 10s and fail fast
+        # rather than making the user wait 25s. The proactive reload in the
+        # Hermes block handles the cold-start case.
+        turn_timeout_s: float = 15.0,
         enabled: bool = True,
         hermes_enabled: bool | None = None,
     ) -> None:
@@ -470,28 +469,26 @@ class IntentRouter:
         n_calls = 0
         hermes_reason = "disabled" if not self.hermes_enabled else ""
         if self.hermes_enabled and self._hermes and self._executor:
-            # Proactive model reload: on the 4GB RTX 3050 with WDDM, the GPU
-            # driver evicts Ollama's CUDA model after ~2 min idle despite
-            # OLLAMA_KEEP_ALIVE=-1. Detect eviction and reload only if there
-            # is enough time budget left. The reload takes ~15s; the
-            # turn_timeout is 8s. If local already used >2s, skip the reload
-            # and let Hermes try directly (it will either work fast if model
-            # happened to reload, or fail with a clear timeout error).
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            if elapsed_ms < 2000:
-                try:
-                    async with session.get(
-                        f"{self._hermes.ollama_url}/api/ps",
-                        timeout=aiohttp.ClientTimeout(total=2),
-                    ) as resp:
-                        ps = await resp.json()
-                        if not ps.get("models"):
-                            log.info("Ollama model evicted, reloading before Hermes...")
-                            t_warm = time.perf_counter()
-                            await self._hermes.ask(session, "warmup", specialist="chat")
-                            log.info("Ollama reloaded in %.0f ms", (time.perf_counter() - t_warm) * 1000)
-                except Exception:  # noqa: BLE001 - best effort, don't block the turn
-                    pass
+            # Proactive Ollama model reload. On the 4GB RTX 3050 with WDDM,
+            # the GPU driver evicts the model after ~2-3 min idle despite
+            # OLLAMA_KEEP_ALIVE=-1 (display driver claims VRAM first).
+            # Reload takes ~15s; without it, every Hermes command fails at
+            # turn_timeout. The keepalive background task tries to keep it
+            # loaded, but when it falls behind we reload on-demand here.
+            # Cost when model IS loaded: ~8ms for the /api/ps check.
+            try:
+                async with session.get(
+                    f"{self._hermes.ollama_url}/api/ps",
+                    timeout=aiohttp.ClientTimeout(total=2),
+                ) as resp:
+                    ps = await resp.json()
+                    if not ps.get("models"):
+                        log.info("Ollama model evicted, reloading before Hermes...")
+                        t_warm = time.perf_counter()
+                        await self._hermes.ask(session, "warmup", specialist="chat")
+                        log.info("Ollama reloaded in %.0f ms", (time.perf_counter() - t_warm) * 1000)
+            except Exception as exc:  # noqa: BLE001 - never let a failed reload block the turn
+                log.debug("Ollama check failed (%s); proceeding to Hermes anyway", exc)
             # Questions are normally the big agent's job, because a specialist
             # holds only actuation tools and would answer from its own head.
             #
