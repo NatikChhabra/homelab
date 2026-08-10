@@ -138,9 +138,9 @@ async def _traccar_positions(http: aiohttp.ClientSession) -> tuple[list[dict], s
                 return [], f"Traccar returned HTTP {resp.status}"
             devices = await resp.json(content_type=None)
     except asyncio.TimeoutError:
-        return [], f"Traccar did not answer at {TRACCAR_URL} within 2.5s"
-    except aiohttp.ClientError as exc:
-        return [], f"Traccar not running at {TRACCAR_URL} ({type(exc).__name__})"
+        return [], ""  # Traccar not responding — silent, not an error
+    except aiohttp.ClientError:
+        return [], ""  # Traccar not running — silent, not an error
     except (ValueError, json.JSONDecodeError):
         return [], "Traccar returned a non-JSON device list"
 
@@ -268,7 +268,7 @@ async def map_panel(request: web.Request) -> web.Response:
         "devices": devices,
         "unlocated": unlocated,
         "sources": {
-            "traccar": {"ok": bool(traccar), "detail": traccar_err or f"{len(traccar)} device(s)"},
+            "traccar": {"ok": bool(traccar), "detail": traccar_err or (f"{len(traccar)} device(s)" if traccar else "not configured")},
             "home_assistant": {
                 "ok": not ha_err,
                 "detail": ha_err or f"{len(located)} located, {len(unlocated)} without a fix",
@@ -276,9 +276,9 @@ async def map_panel(request: web.Request) -> web.Response:
         },
         "reason": (
             "" if centre else
-            "No GPS source has a position: " + (traccar_err or "Traccar unavailable")
-            + "; Home Assistant " + (ha_err or "has no tracker with coordinates")
-        ),
+            ("No GPS source has a position: " + (traccar_err or "Traccar unavailable") + "; " if traccar_err else "")
+            + ("Home Assistant " + (ha_err or "has no tracker with coordinates") if ha_err else "")
+        ).rstrip("; "),
     })
 
 
