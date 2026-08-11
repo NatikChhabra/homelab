@@ -39,7 +39,7 @@
       </div>
     </sc-for>
   </div>
-  <canvas ref="{{ mainRef }}" style="position:absolute; left:50%; top:52%; width:1000px; height:1000px; margin:-500px 0 0 -500px"></canvas>
+  <canvas ref="{{ mainRef }}" style="position:absolute; left:50%; top:50%; width:70vmin; height:70vmin; margin:-35vmin 0 0 -35vmin"></canvas>
 
   <div style="position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 320px 110px #040404"></div>
   <div style="position:absolute; inset:-8%; pointer-events:none; opacity:.04; background-image:radial-gradient(#FFFFFF 1px,transparent 1px); background-size:3px 3px; animation:cGrain .5s steps(1) infinite"></div>
@@ -344,10 +344,12 @@ class Component extends DCLogic {
   }
 
   layout(n) {
-    const size = Math.max(74, Math.min(146, Math.round(1000 / Math.max(n, 1))));
+    const W = window.innerWidth || 1920, H = window.innerHeight || 1080;
+    const size = Math.max(54, Math.min(120, Math.round(W * 0.065)));
     return this.state.comps.map((c, i) => {
-      const t = n === 1 ? .5 : i / (n - 1);
-      const x = 430 + t * 1060, y = 196 - Math.sin(t * Math.PI) * 104;
+      const t = n === 1 ? .5 : i / Math.max(n - 1, 1);
+      const cx = W * 0.5, arcW = W * 0.28, arcH = H * 0.096;
+      const x = cx - arcW + t * arcW * 2, y = H * 0.18 - Math.sin(t * Math.PI) * arcH;
       return { x, y, size };
     });
   }
@@ -364,6 +366,10 @@ class Component extends DCLogic {
     this.raf = requestAnimationFrame(loop);
     this.churn = setInterval(() => this.setState(s => ({ k: s.k + 1 })), 200);
     this.advance();
+    window.addEventListener('resize', () => {
+      if (this.main) this.main.size = Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.7);
+      this.setState(s => s);
+    });
   }
   componentWillUnmount() { cancelAnimationFrame(this.raf); clearInterval(this.churn); clearTimeout(this.tm); }
 
@@ -398,10 +404,11 @@ class Component extends DCLogic {
       this.go(SEQ[(i + 1) % SEQ.length]); this.advance();
     }, ST[this.state.s].hold);
   }
-  go(s) {
+  go(s, autoAdvance=true) {
     const idx = SEQ.indexOf(s);
     this.setState(st => ({ s, reached: s === "idle" ? 0 : Math.max(st.reached, idx) }));
     const c = ST[s];
+    if (autoAdvance !== false) this.advance();
     if (this.main) { this.main.setColor(c.rgb); this.main.amp = c.amp; this.main.spin = c.spin; this.main.morph = c.morph; }
     this.cclouds.forEach(cl => { cl.amp = c.amp * .5; });
     const f = this.cclouds.get(this.state.focus);
@@ -656,8 +663,7 @@ window.addEventListener('jarvis-state', function(e) {
   if (!_dcComponent) return;
   const st = e.detail.state;
   if (SEQ.indexOf(st) >= 0) {
-    _dcComponent.go(st);
-    _dcComponent.advance();
+    _dcComponent.go(st, false);
   }
 });
 
