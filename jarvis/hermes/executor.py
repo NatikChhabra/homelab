@@ -548,11 +548,19 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
     if tool == "call_make":
         if "needs explicit confirmation" in (detail or ""):
             return "I will not make that call without you confirming it first."
+        if "not available" in low:
+            return "Calling is not available right now, Sir."
 
     if tool == "web_search" and err == "disabled":
         return "Internet search is not available right now."
     if tool == "web_fetch" and err == "disabled":
         return "Web fetching is not available right now."
+
+    # Missing error cases from earlier audit
+    if tool == "ha_call_service" and "cannot connect" in low:
+        return "I could not reach the lights, Sir."
+    if "did not understand" in (detail or ""):
+        return "I did not understand that, Sir."
 
     # Missing error cases from earlier audit
     if tool == "ha_call_service" and "cannot connect" in low:
