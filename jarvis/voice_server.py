@@ -68,6 +68,22 @@ PIPER = (os.getenv("PIPER_HOST", "jarvis-piper"), int(os.getenv("PIPER_PORT", "1
 WAKE = (os.getenv("WAKE_HOST", "jarvis-wake-word"), int(os.getenv("WAKE_PORT", "10400")))
 
 WAKE_WORD = os.getenv("WAKE_WORD", "hey_jarvis")
+
+# searxng and websearch are the ONLY outbound internet path from JARVIS.
+# Probing them separately matters: searxng can be up while websearch crashes,
+# or vice versa (websearch depends on searxng, so searxng down always makes
+# websearch down too, but the reverse is not true).
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://jarvis-searxng:8080").rstrip("/")
+WEBSEARCH_URL = os.getenv("WEBSEARCH_URL", "http://jarvis-websearch:3101").rstrip("/")
+
+# Ollama base URL, already set in compose but duplicated here so the status
+# endpoint can reach it without constructing the URL from env each time.
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://jarvis-ollama:11434").rstrip("/")
+
+# PC agent on the host. Used by /api/vitals for real NTFS disk usage (glances
+# fs plugin returns [] on Docker Desktop Windows because C:/D: are 9p mounts).
+PC_AGENT_URL = os.getenv("JARVIS_PC_URL", "http://host.docker.internal:8099").rstrip("/")
+PC_AGENT_TOKEN = os.getenv("JARVIS_PC_TOKEN") or os.getenv("JARVIS_WOL_TOKEN") or ""
 # Voice selection now lives in tts_engine.py, which owns the Kokoro/Piper
 # choice. PIPER stays defined above because /api/status still probes it as a
 # service -- it is the fallback engine, so its liveness is worth reporting even
@@ -634,12 +650,66 @@ async def status(request: web.Request) -> web.Response:
     ollama_state = "error"
     try:
         async with request.app["http"].get(
-            f"{os.getenv('OLLAMA_URL', 'http://jarvis-ollama:11434')}/api/tags",
+            f"{OLLAMA_URL}/api/tags",
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
             ollama_state = "ok" if resp.status == 200 else f"http-{resp.status}"
     except (aiohttp.ClientError, asyncio.TimeoutError):
         ollama_state = "unreachable"
+
+    # searxng: self-hosted metasearch. The ONLY container allowed outbound
+    # internet. If this is down, web_search agents return nothing and the
+    # assistant quietly lies by omission rather than saying "I cannot search."
+    searxng_state = "error"
+    try:
+        async with request.app["http"].get(
+            f"{SEARXNG_URL}/search?q=test&format=json",
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            searxng_state = "ok" if resp.status == 200 else f"http-{resp.status}"
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        searxng_state = "unreachable"
+
+    # websearch: the agent that calls searxng and optionally summarises via
+    # Ollama. More fragile than searxng itself (depends on both searxng AND
+    # ollama), so it gets its own line rather than being inferred from the
+    # parent.
+    websearch_state = "error"
+    try:
+        async with request.app["http"].get(
+            f"{WEBSEARCH_URL}/healthz",
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            websearch_state = "ok" if resp.status == 200 else f"http-{resp.status}"
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        websearch_state = "unreachable"
+
+    # GPU VRAM headroom. Read from the Ollama /api/ps endpoint which reports
+    # per-model VRAM usage (size_vram in bytes). The keep-warm ticker keeps the
+    # model loaded; this number tells us how close to the 4 GB edge we are.
+    # /api/stats (MiB-per-GPU) does not exist in Ollama 0.32.x.
+    gpu_state = "unavailable"
+    try:
+        async with request.app["http"].get(
+            f"{OLLAMA_URL}/api/ps",
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status == 200:
+                raw = await resp.json()
+                models = raw.get("models") or []
+                total_vram = sum(
+                    m.get("size_vram", 0) for m in models
+                    if isinstance(m, dict)
+                )
+                gpu_state = {
+                    "miB_used": round(total_vram / 1_048_576, 1),
+                    "models_loaded": len(models),
+                    "model_names": [m.get("name", "") for m in models if isinstance(m, dict)],
+                }
+            else:
+                gpu_state = f"http-{resp.status}"
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        gpu_state = "unreachable"
 
     return web.json_response({
         "hass": hass_state,
@@ -648,6 +718,9 @@ async def status(request: web.Request) -> web.Response:
         "whisper": "ok" if whisper_info else "unreachable",
         "piper": "ok" if piper_info else "unreachable",
         "wake_word": "ok" if wake_info else "unreachable",
+        "searxng": searxng_state,
+        "websearch": websearch_state,
+        "gpu": gpu_state,
         # Which engine is really speaking. Reported because the Kokoro->Piper
         # fallback is deliberately silent to the listener: JARVIS keeps talking,
         # he just stops sounding right. Without this the only evidence is a log
@@ -695,6 +768,18 @@ async def vitals(request: web.Request) -> web.Response:
     on the host's published port, which a browser on the tailnet can reach only
     if it happens to be on the LAN too, and going through here keeps the UI a
     single origin so no CORS setup is needed.
+
+    Two plugins are structurally unavailable on this host and both reported as
+    such rather than omitted:
+
+      * `fs` returns [] because Docker Desktop exposes C: and D: as 9p mounts
+        and psutil.disk_partitions only lists physical filesystems.
+      * `sensors` answers HTTP 400 — no readable thermal source inside the
+        container.
+
+    PC disk usage comes from the host-side pc-agent (real NTFS via
+    Win32_LogicalDisk), and GPU VRAM from Ollama's /api/stats. Both are
+    documented gaps that were previously unreported.
     """
     async def grab(path: str) -> Any:
         try:
@@ -708,7 +793,38 @@ async def vitals(request: web.Request) -> web.Response:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return None
 
-    cpu, mem, load = await asyncio.gather(grab("cpu"), grab("mem"), grab("load"))
+    async def grab_ollama(path: str) -> Any:
+        try:
+            async with request.app["http"].get(
+                f"{OLLAMA_URL}{path}",
+                timeout=aiohttp.ClientTimeout(total=4),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+
+    async def grab_pc() -> Any:
+        if not PC_AGENT_URL or not PC_AGENT_TOKEN:
+            return None
+        try:
+            headers = {"Authorization": f"Bearer {PC_AGENT_TOKEN}"}
+            async with request.app["http"].get(
+                f"{PC_AGENT_URL}/pc/disks",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=4),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+
+    cpu, mem, load, ollama_ps, pc_disks = await asyncio.gather(
+        grab("cpu"), grab("mem"), grab("load"),
+        grab_ollama("/api/ps"), grab_pc(),
+    )
 
     out: dict[str, Any] = {}
     if cpu:
@@ -721,6 +837,41 @@ async def vitals(request: web.Request) -> web.Response:
         out["mem_total_gb"] = round(mem.get("total", 0) / 1_073_741_824, 1)
     if load:
         out["load_1m"] = load.get("min1")
+
+    # GPU VRAM from Ollama /api/ps. size_vram is the bytes of VRAM each loaded
+    # model holds. Summed across all loaded models for the total.
+    if ollama_ps and isinstance(ollama_ps.get("models"), list):
+        total_vram = sum(
+            m.get("size_vram", 0) for m in ollama_ps["models"]
+            if isinstance(m, dict)
+        )
+        out["gpu"] = {
+            "miB_used": round(total_vram / 1_048_576, 1),
+            "models_loaded": len(ollama_ps["models"]),
+            "model_names": [m.get("name", "") for m in ollama_ps["models"] if isinstance(m, dict)],
+        }
+
+    # PC disk usage from the host-side agent. Glances fs plugin cannot read
+    # Windows drives inside Docker Desktop (9p mount limitation).
+    if pc_disks and isinstance(pc_disks.get("disks"), list):
+        out["disk"] = {
+            "available": True,
+            "drives": [
+                {
+                    "drive": d.get("drive"),
+                    "label": d.get("label", ""),
+                    "used_gb": d.get("used_gb"),
+                    "total_gb": d.get("total_gb"),
+                    "percent_used": d.get("percent_used"),
+                }
+                for d in pc_disks["disks"]
+            ],
+        }
+    else:
+        out["disk"] = {
+            "available": False,
+            "reason": "pc-agent not reachable (port 8099) or token not configured",
+        }
 
     out["available"] = bool(out)
     return web.json_response(out)
