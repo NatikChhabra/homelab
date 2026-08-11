@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import asyncio
 import aiohttp
 
 log = logging.getLogger("jarvis.hermes.exec")
@@ -284,6 +285,33 @@ HTTP_ROUTES: dict[str, str] = {
 # HTTP dispatch block and go straight to _run_call.
 CALL_TOOLS = frozenset({"call_make", "call_answer", "call_reject", "call_state"})
 
+# Actions that must not leave the building without explicit user confirmation.
+# The 3B model sometimes hallucinates actuation calls from noisy audio; a
+# refusal that returns a spoken explanation stops the lie before it starts.
+CONFIRM_TOOLS = frozenset({"wa_send", "call_make"})
+
+# Tool -> list of entity IDs whose state should change after the tool runs.
+# Used by the closed-loop verifier: capture before, dispatch, re-query after,
+# complain if nothing moved. Covers the most dangerous failure mode -- JARVIS
+# confirming an actuation that the device silently ignored.
+ACTUATION_ENTITIES: dict[str, list[str]] = {
+    "fan_set": ["fan.fan", "input_number.fan_speed"],
+    "ac_on": ["input_boolean.ac_power"],
+    "ac_set_temperature": ["input_boolean.ac_power", "input_number.ac_temperature"],
+    "good_night": ["light.node_switch_gang_1", "light.node_switch_gang_2",
+                    "light.node_switch_gang_3", "fan.fan",
+                    "input_boolean.ac_power"],
+}
+# Tools whose desired post-action state we can predict from the arguments.
+ACTUATION_EXPECTED: dict[str, dict[str, str | None]] = {
+    # entity_id -> expected state after the tool succeeds
+    "fan_set": {"fan.fan": "on", "input_number.fan_speed": None},  # None = don't check
+    "ac_on": {"input_boolean.ac_power": "on"},
+    "ac_set_temperature": {"input_boolean.ac_power": "on"},
+    # good_night turns everything off; checked by re-query alone.
+}
+ACTUATION_TOOLS = frozenset(ACTUATION_ENTITIES)
+
 
 def _clip_text(text: str, limit: int = 120) -> str:
     """Collapse a message to one line and fit it for speech.
@@ -500,6 +528,8 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
             return f"To {action} the PC you must confirm it clearly, so I have not done it."
 
     if tool == "wa_send":
+        if "needs explicit confirmation" in (detail or ""):
+            return "I will not send that without you confirming it first."
         if err == "contact_not_allowed":
             return "That name is not in your WhatsApp contacts, so I did not send it."
         if err == "not_linked":
@@ -514,6 +544,10 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
         return "WhatsApp is not linked yet, so I cannot read your messages."
     if tool == "pc_app" and err in ("app_not_allowed", "not_allowed"):
         return "That application is not on the allowed list."
+
+    if tool == "call_make":
+        if "needs explicit confirmation" in (detail or ""):
+            return "I will not make that call without you confirming it first."
 
     if tool == "web_search" and err == "disabled":
         return "Internet search is not available right now."
@@ -749,6 +783,10 @@ class Executor:
                     notes)
 
         # --- host HTTP services (PC agent, WhatsApp bridge, websearch, capabilities)
+        # Confirmation gate: wa_send and call_make refuse without confirm:true.
+        if tool in CONFIRM_TOOLS and args.get("confirm") is not True:
+            return done(False, f"{tool} needs explicit confirmation", notes)
+
         if tool in HTTP_ROUTES:
             which = HTTP_ROUTES[tool]
             if which == "pc":
@@ -803,6 +841,70 @@ class Executor:
         ok, detail = await self._post(
             session, f"/api/services/script/{tool}", clean)
         return done(ok, detail, notes)
+
+    async def _verify_actuation(
+        self, session: aiohttp.ClientSession, tool: str,
+        args: dict[str, Any],
+    ) -> str | None:
+        """
+        Re-query entities after an actuation and return a complaint if nothing
+        changed. Returns None when the state looks correct (or we cannot tell).
+
+        Must not add latency to the local path -- the caller speaks the
+        acknowledgement first and calls this in the background. Here we just
+        return the string; the router decides whether to append it.
+        """
+        entity_ids = ACTUATION_ENTITIES.get(tool)
+        if not entity_ids:
+            return None
+        expected = ACTUATION_EXPECTED.get(tool, {})
+
+        # Snapshot current states.
+        before: dict[str, str] = {}
+        try:
+            for eid in entity_ids:
+                async with session.get(
+                    f"{self.hass_url}/api/states/{eid}",
+                    headers=self._headers,
+                    timeout=aiohttp.ClientTimeout(total=3.0),
+                ) as resp:
+                    if resp.status == 200:
+                        state = await resp.json()
+                        before[eid] = str(state.get("state") or "unknown")
+        except Exception:  # noqa: BLE001 - verification failure is not a tool failure
+            return None
+
+        # Wait for the device to settle.
+        await asyncio.sleep(1.5)
+
+        # Re-query.
+        after: dict[str, str] = {}
+        try:
+            for eid in entity_ids:
+                async with session.get(
+                    f"{self.hass_url}/api/states/{eid}",
+                    headers=self._headers,
+                    timeout=aiohttp.ClientTimeout(total=3.0),
+                ) as resp:
+                    if resp.status == 200:
+                        state = await resp.json()
+                        after[eid] = str(state.get("state") or "unknown")
+        except Exception:  # noqa: BLE001
+            return None
+
+        # Compare.
+        for eid, exp in expected.items():
+            if exp is None:
+                continue
+            if after.get(eid) == exp:
+                continue
+            return f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {after.get(eid, chr(63))}, not {exp}."
+        # For tools without a fixed expected state (good_night), check that
+        # at least one entity changed.
+        if not expected and all(after.get(eid) == before.get(eid) for eid in entity_ids
+                                if eid in before and eid in after):
+            return "That did not take, Sir. The devices did not change state."
+        return None
 
     async def _run_call(self, session: aiohttp.ClientSession,
                         tool: str, args: dict[str, Any]) -> ExecResult:
