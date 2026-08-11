@@ -35,7 +35,7 @@ ROUTING_CASES = [
 class TestRouterRouting:
     """Test router routing decisions."""
     
-    def test_router_class_exists:**
+    def test_router_class_exists(self):
         """IntentRouter class should exist."""
         assert hasattr(router, 'IntentRouter')
     
