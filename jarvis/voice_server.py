@@ -938,6 +938,14 @@ async def download_hud(request):
     return resp
 
 
+async def docs_summary(request):
+    docs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ui', 'docs')
+    html_path = os.path.join(docs_dir, 'PROJECT_SUMMARY.html')
+    if not os.path.exists(html_path):
+        return web.HTTPNotFound()
+    return web.FileResponse(html_path)
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
@@ -956,7 +964,8 @@ def build_app() -> web.Application:
     # Panels, the display-directive channel, and the allowlisted actuation
     # endpoint. Registered last and entirely additively: every route it adds is
     # under /api/hud/, so nothing above can change behaviour.
-    app.add_routes([web.get("/download/hud", download_hud)])
+    app.add_routes([web.get("/download/hud", download_hud),
+                    web.get("/docs/summary", docs_summary)])
     hud.register(app)
     return app
 
