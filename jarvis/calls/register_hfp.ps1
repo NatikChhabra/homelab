@@ -6,7 +6,7 @@ Write-Output ""
 Write-Output "This script will register JARVIS with Windows for hands-free calling."
 Write-Output "Your phone will need to be connected via Bluetooth."
 Write-Output ""
-Read-Host "Press Enter to continue..."
+# Non-interactive: removed Read-Host
 
 # Load WinRT types
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -51,4 +51,4 @@ foreach ($dev in $devices) {
 
 Write-Output ""
 Write-Output "Registration attempt complete."
-Read-Host "Press Enter to exit..."
+# Non-interactive: removed Read-Host
