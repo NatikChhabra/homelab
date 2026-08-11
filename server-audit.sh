@@ -700,7 +700,7 @@ sec "16. JARVIS voice assistant"
 # -- if it dies, JARVIS silently falls back to the Piper voice Natik rejected,
 # which sounds like a quality regression rather than an outage. Adding a service
 # without adding it here is the exact hole this audit exists to close.
-JARVIS_CONTAINERS="jarvis-ollama jarvis-hass jarvis-whisper jarvis-piper jarvis-wake-word jarvis-voice jarvis-kokoro jarvis-capabilities"
+JARVIS_CONTAINERS="jarvis-ollama jarvis-hass jarvis-whisper jarvis-piper jarvis-wake-word jarvis-voice jarvis-kokoro jarvis-capabilities jarvis-websearch jarvis-searxng"
 for c in $JARVIS_CONTAINERS; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
   if [ "$st" != "running" ]; then
