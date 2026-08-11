@@ -61,6 +61,13 @@ TRACCAR_URL = os.getenv("TRACCAR_URL", "http://host.docker.internal:8082").rstri
 TRACCAR_USER = os.getenv("TRACCAR_USER", "")
 TRACCAR_PASS = os.getenv("TRACCAR_PASS", "")
 
+# Real disk usage. glances' fs plugin always returns [] here (see vitals_panel
+# docstring), so this asks the pc-agent instead: it runs directly on the host,
+# outside Docker Desktop's 9p mount translation, and can read the real NTFS
+# volumes. Same token executor.py uses to reach pc-agent for pc_* tools.
+PC_URL = os.getenv("JARVIS_PC_URL", "http://host.docker.internal:8099").rstrip("/")
+PC_TOKEN = os.getenv("JARVIS_PC_TOKEN") or os.getenv("JARVIS_WOL_TOKEN") or ""
+
 _HA_HEADERS = {"Authorization": f"Bearer {HASS_TOKEN}"} if HASS_TOKEN else {}
 
 

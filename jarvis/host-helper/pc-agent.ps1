@@ -562,6 +562,29 @@ function Get-BatteryInfo {
     } catch { return [pscustomobject]@{ present = $false; error = $_.Exception.Message } }
 }
 
+# Real Windows disk usage, queried on the host where fixed drives are actual
+# NTFS volumes. Containers on this box (glances, jarvis-voice) cannot do this
+# themselves: Docker Desktop exposes C: and D: as 9p mounts, and
+# psutil.disk_partitions only lists physical filesystems, so the fs plugin
+# always returns []. Documented in Stacks/server-room/docker-compose.yml.
+# Only fixed drives (DriveType 3) are reported -- no removable/network drives,
+# and no paths or file listings, just aggregate GB numbers per drive letter.
+function Get-DiskUsage {
+    $drives = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3'
+    return @($drives | ForEach-Object {
+        $totalGb = [Math]::Round($_.Size / 1GB, 1)
+        $freeGb  = [Math]::Round($_.FreeSpace / 1GB, 1)
+        [pscustomobject]@{
+            drive         = $_.DeviceID
+            label         = $_.VolumeName
+            total_gb      = $totalGb
+            free_gb       = $freeGb
+            used_gb       = [Math]::Round($totalGb - $freeGb, 1)
+            percent_used  = $(if ($totalGb -gt 0) { [Math]::Round((($totalGb - $freeGb) / $totalGb) * 100, 1) } else { $null })
+        }
+    })
+}
+
 function Get-PcStatus {
     $os   = Get-CimInstance Win32_OperatingSystem
     $boot = $os.LastBootUpTime
@@ -800,7 +823,7 @@ try {
 
         # ---- desktop guard ----
         # Everything under /pc/ except status needs the interactive desktop.
-        $needsDesktop = $path -like '/pc/*' -and $path -ne '/pc/status'
+        $needsDesktop = $path -like '/pc/*' -and $path -ne '/pc/status' -and $path -ne '/pc/disks'
         if ($needsDesktop -and -not $script:Interactive) {
             $null = Send-Json $ctx 503 @{
                 error = 'no_interactive_session'
@@ -903,6 +926,14 @@ try {
                 $s = Get-PcStatus
                 $null = Send-Json $ctx 200 $s
                 Write-Log INFO "GET /pc/status from $remote -> 200 uptime=$($s.uptime_human)"
+                break
+            }
+
+            # ============================================ real disk usage ====
+            '^GET /pc/disks$' {
+                $disks = Get-DiskUsage
+                $null = Send-Json $ctx 200 @{ disks = $disks; checked_at = (Get-Date -Format 'o') }
+                Write-Log INFO "GET /pc/disks from $remote -> 200 ($($disks.Count) drive(s))"
                 break
             }
 
