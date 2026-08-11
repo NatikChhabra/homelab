@@ -554,6 +554,16 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
     if tool == "web_fetch" and err == "disabled":
         return "Web fetching is not available right now."
 
+    # Missing error cases from earlier audit
+    if tool == "ha_call_service" and "cannot connect" in low:
+        return "I could not reach the lights, Sir."
+    if tool == "conversation" and "did not understand" in low:
+        return "I did not understand that, Sir."
+    if "turn_timeout" in (detail or ""):
+        return "That took too long to process, Sir."
+    if tool.startswith("call_") and "not available" in low:
+        return "Calling is not available right now, Sir."
+
     # Transport-level problems, common to both services. "unreachable" is worth
     # saying out loud: a host service being down is something Natik can fix, and
     # silence here previously read as the model simply ignoring him.
