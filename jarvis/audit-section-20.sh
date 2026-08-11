@@ -273,3 +273,15 @@ else
   C_AVAIL=$(df -h /c 2>/dev/null | tail -1 | awk '{print $4}')
   ok "C: drive free space OK (${C_AVAIL} available)"
 fi
+
+# --- File Browser :8095 ------------------------------------------------------
+# Undocumented service. Serves C:/ServerData/Sync/ as root. Useful for
+# pulling reports off the box without Tailscale SSH. Not part of the JARVIS
+# compose stack (it is a separate Docker container on the host) so it was
+# missed by every earlier health check.
+FB_HTML=$(curl -s -m 5 http://localhost:8095/ 2>/dev/null)
+if printf '%s' "$FB_HTML" | grep -q 'File Browser'; then
+  ok "File Browser :8095 responding (serves C:/ServerData/Sync/)"
+else
+  fail "File Browser :8095 NOT responding -- report access path is DOWN"
+fi
