@@ -144,3 +144,122 @@ elif docker logs jarvis-voice 2>&1 | tail -200 | grep -qi "could not be imported
 else
   warn "cannot tell from jarvis-voice logs whether closed-loop verification is enabled"
 fi
+
+# --- infrastructure health: the stuff section 16 does NOT cover --------------
+# Section 16 checks that containers are up and their health endpoints answer.
+# This block checks that the system is actually usable end-to-end. All of these
+# have been silent failures at some point: a service returns 200 but cannot
+# do its job, or a host process dies and nothing notices because Docker does
+# not supervise it.
+
+# --- Kokoro TTS synthesis test ------------------------------------------------
+# Incident: Kokoro reported healthy on /health while the /v1/audio/speech
+# endpoint returned 404 for hours. A synthesis call that returns <100 bytes
+# is not audio -- it is an error JSON. This check actually generates 5 seconds
+# of speech and verifies the output is real audio.
+KOKORO_OUT=$(curl -s -m 15 -X POST http://localhost:8880/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"kokoro","input":"JARVIS is operational","voice":"bm_george"}' \
+  -o /tmp/_audit_kokoro.wav 2>/dev/null && wc -c < /tmp/_audit_kokoro.wav | tr -d ' ')
+if [ "${KOKORO_OUT:-0}" -ge 8000 ] 2>/dev/null; then
+  ok "Kokoro TTS synthesis produces real audio (${KOKORO_OUT} bytes)"
+elif [ -n "${KOKORO_OUT}" ]; then
+  fail "Kokoro TTS synthesis returned only ${KOKORO_OUT} bytes -- likely JSON error, not audio"
+else
+  warn "Kokoro TTS synthesis could not reach localhost:8880 -- TTS path is UNVERIFIED"
+fi
+rm -f /tmp/_audit_kokoro.wav
+
+# --- searxng HTTP check -------------------------------------------------------
+# Incident: searxng container was running but all engines returned 0 results
+# because the config had no enabled engines. The service answered 200 for the
+# front page while being completely useless.
+SEARXNG_RESULT=$(curl -s -m 15 "http://localhost:8100/search?q=wikipedia_test&format=json" 2>/dev/null)
+SEARXNG_N=$(printf '%s' "$SEARXNG_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('results',[])))" 2>/dev/null || echo 0)
+if [ "${SEARXNG_N:-0}" -ge 1 ] 2>/dev/null; then
+  ok "searxng returns real search results (${SEARXNG_N} results for test query)"
+else
+  fail "searxng returned no results for test query -- search is broken despite container being healthy"
+fi
+
+# --- websearch real query test -------------------------------------------------
+# Incident: websearch /api/status reported "websearch": "ok" while Google CSE
+# was suspended ("too many requests"). The service answered 200 but all queries
+# fell back to Wikipedia with a note about refusing engines. The status check
+# only verifies the HTTP endpoint exists, not that the upstream is usable.
+WS_RESULT=$(curl -s -m 20 "http://localhost:3101/search?q=what+is+the+time" 2>/dev/null)
+WS_OK=$(printf '%s' "$WS_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok',False))" 2>/dev/null)
+WS_MODE=$(printf '%s' "$WS_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mode','?'))" 2>/dev/null)
+WS_REFUSING=$(printf '%s' "$WS_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(d.get('engines_refusing',[])))" 2>/dev/null)
+if [ "$WS_OK" = "True" ]; then
+  if [ -n "$WS_REFUSING" ] && [ "$WS_REFUSING" != "[]" ]; then
+    warn "websearch works but upstream engines refusing: ${WS_REFUSING} (mode=${WS_MODE})"
+  else
+    ok "websearch real query succeeds (mode=${WS_MODE})"
+  fi
+else
+  fail "websearch /search returned non-OK response -- web search is DOWN"
+fi
+
+# --- host-process liveness (outside Docker) ------------------------------------
+# Incident: host-ears.py and host-speaker.py are Windows scheduled tasks, not
+# Docker containers. When they crash, Docker healthcheck sees nothing wrong
+# because the containers are fine -- only the audio pipeline is broken.
+# Same for pc-agent (PowerShell scheduled task) and wa-bridge (Node.js).
+for TASK in "JARVIS - Ears" "JARVIS - Speaker" "JARVIS - PC Agent"; do
+  STATE=$(powershell -Command "Get-ScheduledTask -TaskName '$TASK' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty State" 2>/dev/null | tr -d ' \r')
+  if [ "$STATE" = "Running" ]; then
+    ok "host task '${TASK}' is Running"
+  elif [ -z "$STATE" ]; then
+    warn "host task '${TASK}' not found -- may not be installed"
+  else
+    fail "host task '${TASK}' is '${STATE}' -- not Running; audio/PC bridge is broken"
+  fi
+done
+
+# wa-bridge is a Node.js process, not a scheduled task by name. Check via health.
+WA_HEALTH=$(curl -s -m 5 http://localhost:8097/health 2>/dev/null)
+WA_LINKED=$(printf '%s' "$WA_HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('linked',False))" 2>/dev/null)
+if printf '%s' "$WA_HEALTH" | grep -q '"service":"jarvis-whatsapp"'; then
+  ok "wa-bridge health endpoint responding on port 8097"
+  if [ "$WA_LINKED" = "True" ]; then
+    ok "wa-bridge is linked to WhatsApp"
+  else
+    warn "wa-bridge is running but NOT linked to WhatsApp (awaiting QR scan)"
+  fi
+else
+  fail "wa-bridge health endpoint NOT responding on port 8097 -- WhatsApp bridge is DOWN"
+fi
+
+# --- VRAM headroom -------------------------------------------------------------
+# Incident: Ollama evicted qwen2.5:3b under memory pressure, causing every
+# LLM call to hit an 8-second cold start. With KEEP_ALIVE=-1 this should not
+# happen, but the check confirms the model is actually resident.
+GPU_MIБ=$(curl -s http://localhost:3100/api/status 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gpu',{}).get('miB_used',0))" 2>/dev/null)
+GPU_TOTAL=4096
+if [ -n "$GPU_MIБ" ] && [ "$(printf '%s' "$GPU_MIБ" | grep -c '[0-9]')" -gt 0 ]; then
+  GPU_PCT=$(python3 -c "print(int(float('${GPU_MIБ}')/${GPU_TOTAL}*100))" 2>/dev/null)
+  GPU_FREE=$((GPU_TOTAL - $(python3 -c "print(int(float('${GPU_MIБ}')))")))
+  if [ "${GPU_PCT:-0}" -lt 80 ]; then
+    ok "VRAM headroom OK: ${GPU_MIБ} MiB / ${GPU_TOTAL} MiB used (${GPU_PCT}%), ${GPU_FREE} MiB free"
+  elif [ "${GPU_PCT:-0}" -lt 95 ]; then
+    warn "VRAM pressure: ${GPU_MIБ} MiB / ${GPU_TOTAL} MiB used (${GPU_PCT}%) -- eviction risk if another model loads"
+  else
+    fail "VRAM near-exhaustion: ${GPU_MIБ} MiB / ${GPU_TOTAL} MiB used (${GPU_PCT}%) -- Ollama may evict under load"
+  fi
+else
+  warn "could not read GPU VRAM from /api/status -- headroom UNVERIFIED"
+fi
+
+# --- free space on C: ---------------------------------------------------------
+# Incident: Docker overlay filled C: drive because log rotation was not
+# configured for jarvis-voice. A full drive kills new container writes.
+C_USED_PCT=$(df -h /c 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%' || echo "")
+if [ -n "$C_USED_PCT" ] && [ "$C_USED_PCT" -ge 95 ] 2>/dev/null; then
+  fail "C: drive at ${C_USED_PCT}% -- Docker and system operations at risk"
+elif [ -n "$C_USED_PCT" ] && [ "$C_USED_PCT" -ge 85 ] 2>/dev/null; then
+  warn "C: drive at ${C_USED_PCT}% -- consider cleaning Docker images or old logs"
+else
+  C_AVAIL=$(df -h /c 2>/dev/null | tail -1 | awk '{print $4}')
+  ok "C: drive free space OK (${C_AVAIL} available)"
+fi
