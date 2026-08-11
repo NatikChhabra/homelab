@@ -1013,7 +1013,7 @@ async def _ollama_keepalive_forever(session: aiohttp.ClientSession) -> None:
             t0 = time.perf_counter()
             await ROUTER._hermes.ask(session, "ping", specialist="chat")
             dt = (time.perf_counter() - t0) * 1000
-            log.debug("Ollama keep-alive: %.0f ms", dt)
+            log.info("Ollama keep-alive: %.0f ms", dt)
         except Exception as exc:  # noqa: BLE001
             log.warning("Ollama keep-alive failed: %s", exc)
 

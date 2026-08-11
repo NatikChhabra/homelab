@@ -89,23 +89,32 @@ async def _send_audio(writer: asyncio.StreamWriter, pcm: bytes, chunk: int = 204
 
 
 async def transcribe(host: str, port: int, pcm: bytes, language: str = "en") -> str:
-    """Send PCM to a Wyoming ASR service and return the transcript text."""
-    reader, writer = await asyncio.open_connection(host, port)
-    try:
-        await write_event(writer, Event("transcribe", {"language": language}))
-        await _send_audio(writer, pcm)
+    """Send PCM to a Wyoming ASR service and return the transcript text.
 
-        while True:
-            event = await read_event(reader)
-            if event is None:
-                return ""
-            # transcript-* streaming variants may precede it, but the spec
-            # guarantees a plain `transcript` is still sent for compatibility.
-            if event.type == "transcript":
-                return (event.data.get("text") or "").strip()
-    finally:
-        writer.close()
-        await writer.wait_closed()
+    Docker Desktop on Windows drops TCP connections between host and containers
+    periodically (WinError 64). On a connection failure we close the dead socket,
+    wait a beat, and retry once before giving up.
+    """
+    for attempt in (1, 2):
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            try:
+                await write_event(writer, Event("transcribe", {"language": language}))
+                await _send_audio(writer, pcm)
+
+                while True:
+                    event = await read_event(reader)
+                    if event is None:
+                        return ""
+                    if event.type == "transcript":
+                        return (event.data.get("text") or "").strip()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        except (OSError, ConnectionError, asyncio.CancelledError):
+            if attempt == 2:
+                raise
+            await asyncio.sleep(0.4)
 
 
 async def synthesize(host: str, port: int, text: str, voice: str | None = None) -> bytes:
