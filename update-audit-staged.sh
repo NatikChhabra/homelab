@@ -1,5 +1,5 @@
 #!/bin/bash
-# Staged by update-audit.sh on 2026-08-09T23:00:03Z.
+# Staged by update-audit.sh on 2026-08-11T08:23:29Z.
 # Run from an INTERACTIVE shell — docker pull needs the credential helper,
 # which fails under Task Scheduler on this host.
 # Only PATCH and MINOR updates are listed. MAJOR / RENAMED are excluded
@@ -7,6 +7,9 @@
 set -euo pipefail
 echo 'Backing up config volumes first...'
 bash /c/ServerData/Stacks/backup-volumes.sh
+
+# jarvis-searxng : 2026.8.4-c63835bd2 -> 2026.8.10-0a118066d (PATCH)
+cd 'C:\ServerData\Stacks\jarvis' && docker compose pull 'searxng' && docker compose up -d 'searxng'
 
 # glances : v4.5.5 -> v4.5.6 (PATCH)
 cd 'C:\ServerData\Stacks\server-room' && docker compose pull 'glances' && docker compose up -d 'glances'
