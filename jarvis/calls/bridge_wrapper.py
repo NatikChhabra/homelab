@@ -44,9 +44,19 @@ async def handle_make(request: web.Request) -> web.Response:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode != 0:
+        # call_bridge.py logs to stdout, not stderr — capture both
+        # stdout/stderr are bytes; decode safely
+        if isinstance(stderr, bytes):
             err = stderr.decode("utf-8", errors="replace")[:200]
-            return web.json_response({"ok": False, "error": err}, status=500)
+        else:
+            err = str(stderr or "")[:200]
+        if isinstance(stdout, bytes):
+            out = stdout.decode("utf-8", errors="replace")[:200]
+        else:
+            out = str(stdout or "")[:200]
+        if proc.returncode != 0:
+            reason = err or out or f"exit code {proc.returncode}"
+            return web.json_response({"ok": False, "error": reason}, status=500)
         try:
             return web.json_response(json.loads(stdout) if stdout else {"ok": True})
         except json.JSONDecodeError:
@@ -60,8 +70,17 @@ async def handle_answer(request: web.Request) -> web.Response:
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        # capture both streams (call_bridge.py logs to stdout)
+        if isinstance(stderr, bytes):
+            err = stderr.decode("utf-8", errors="replace")[:200]
+        else:
+            err = str(stderr or "")[:200]
+        if isinstance(stdout, bytes):
+            out = stdout.decode("utf-8", errors="replace")[:200]
+        else:
+            out = str(stdout or "")[:200]
         if proc.returncode != 0:
-            return web.json_response({"ok": False, "error": stderr.decode()[:200]}, status=500)
+            return web.json_response({"ok": False, "error": err or out}, status=500)
         return web.json_response(json.loads(stdout) if stdout else {"ok": True})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
@@ -72,8 +91,17 @@ async def handle_reject(request: web.Request) -> web.Response:
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        # capture both streams
+        if isinstance(stderr, bytes):
+            err = stderr.decode("utf-8", errors="replace")[:200]
+        else:
+            err = str(stderr or "")[:200]
+        if isinstance(stdout, bytes):
+            out = stdout.decode("utf-8", errors="replace")[:200]
+        else:
+            out = str(stdout or "")[:200]
         if proc.returncode != 0:
-            return web.json_response({"ok": False, "error": stderr.decode()[:200]}, status=500)
+            return web.json_response({"ok": False, "error": err or out}, status=500)
         return web.json_response(json.loads(stdout) if stdout else {"ok": True})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
@@ -84,12 +112,27 @@ async def handle_state(request: web.Request) -> web.Response:
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        if proc.returncode != 0:
-            return web.json_response({"ok": False, "error": stderr.decode()[:200]}, status=500)
+        # call_bridge.py outputs JSON to stdout even on error
+        if isinstance(stdout, bytes):
+            out = stdout.decode("utf-8", errors="replace")
+        else:
+            out = str(stdout or "")
+        if isinstance(stderr, bytes):
+            err = stderr.decode("utf-8", errors="replace")
+        else:
+            err = str(stderr or "")
+        # Try to parse JSON response first
         try:
-            return web.json_response(json.loads(stdout) if stdout else {"ok": True, "state": "unknown"})
+            data = json.loads(out.strip()) if out.strip() else {}
+            if proc.returncode != 0:
+                reason = data.get("reason", err or out[:200])
+                return web.json_response({"ok": False, "error": reason}, status=500)
+            return web.json_response(data)
         except json.JSONDecodeError:
-            return web.json_response({"ok": True, "raw": stdout.decode("utf-8", errors="replace")})
+            # Fallback to plain text error
+            if proc.returncode != 0:
+                return web.json_response({"ok": False, "error": err or out[:200]}, status=500)
+            return web.json_response({"ok": True, "raw": out[:200]})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
