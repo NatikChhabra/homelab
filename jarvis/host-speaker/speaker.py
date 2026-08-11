@@ -54,6 +54,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -148,7 +149,11 @@ def resample(pcm: np.ndarray, src: int, dst: int) -> np.ndarray:
 def synth(text: str, voice: str | None = None) -> np.ndarray:
     """Fetch headerless PCM from Kokoro. `pcm` avoids the streaming-WAV header
     bug documented in fix_wav_header.py, where the data chunk size is the
-    0xFFFFFFFF unknown-length sentinel and players read past the audio."""
+    0xFFFFFFFF unknown-length sentinel and players read past the audio.
+
+    Docker Desktop on Windows drops Kokoro TCP connections (WinError 10054).
+    Retry once with a short pause before giving up.
+    """
     body = json.dumps({
         "model": "kokoro",
         "voice": voice or KOKORO_VOICE,
@@ -159,9 +164,15 @@ def synth(text: str, voice: str | None = None) -> np.ndarray:
     req = urllib.request.Request(
         f"{KOKORO_URL}/v1/audio/speech", data=body,
         headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        raw = r.read()
-    return np.frombuffer(raw, dtype="<i2")
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                raw = r.read()
+            return np.frombuffer(raw, dtype="<i2")
+        except (OSError, ConnectionError, urllib.error.URLError):
+            if attempt == 2:
+                raise
+            time.sleep(0.3)
 
 
 class Speaker:

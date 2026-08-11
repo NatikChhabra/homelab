@@ -51,6 +51,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -65,6 +66,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "host-speaker"))
 import wyoming_client as wy  # noqa: E402
 
 log = logging.getLogger("jarvis.ears")
+
+
+def _load_secrets() -> None:
+    """Load JARVIS secrets from the central secrets.env into the process env.
+
+    The scheduled-task launcher (start-ears.ps1) does this too, but ears.py
+    may also be started directly or restarted by the task manager after the
+    ps1 script has already exited. Reading the file ourselves guarantees the
+    token is present regardless of how the process was launched.
+    """
+    for candidate in (
+        Path(__file__).resolve().parent.parent.parent / "secrets.env",  # C:/ServerData/Stacks/secrets.env
+        Path(__file__).resolve().parent.parent / "secrets.env",          # C:/ServerData/Stacks/jarvis/secrets.env
+    ):
+        if candidate.is_file():
+            for line in candidate.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = re.match(r"^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$", line)
+                if m:
+                    val = m.group(2).strip().strip('"').strip("'")
+                    os.environ.setdefault(m.group(1), val)
+            log.debug("secrets loaded from %s", candidate)
+            return
+    log.warning("secrets.env not found; HA calls may fail")
+
+
+# Load secrets before any env-dependent config is read below.
+_load_secrets()
 
 RATE = 16000          # Wyoming services in this stack are all 16 kHz mono
 BLOCK = 1280          # 80 ms at 16 kHz; openWakeWord's natural chunk
@@ -89,8 +120,8 @@ JARVIS_BEEP = os.getenv("JARVIS_BEEP", "jarvis_online")
 # speech sits in the thousands.
 SILENCE_RMS = float(os.getenv("JARVIS_SILENCE_RMS", "500"))
 SILENCE_HOLD_S = float(os.getenv("JARVIS_SILENCE_HOLD", "0.8"))
-MAX_UTTERANCE_S = float(os.getenv("JARVIS_MAX_UTTERANCE", "12.0"))
-MIN_UTTERANCE_S = 0.3     # below this it is a cough, not a command
+MAX_UTTERANCE_S = float(os.getenv("JARVIS_MAX_UTTERANCE", "20.0"))
+MIN_UTTERANCE_S = 1.5     # below this it is noise, not a command
 
 # Audio captured BEFORE the wake word fires is kept in a short ring buffer and
 # prepended to the recording. openWakeWord reports a detection slightly after
@@ -384,6 +415,14 @@ class Ears:
         if dur < MIN_UTTERANCE_S:
             log.info("too short (%.2fs); ignoring", dur)
             return
+        # Reject audio that is too quiet even if long enough -- a silent room
+        # segment that survived the duration gate (e.g. a long exhalation after
+        # a clap) would otherwise spend STT cycles and return an empty transcript.
+        audio_rms = rms(np.frombuffer(audio, dtype="<i2"))
+        if audio_rms < SILENCE_RMS * 0.5:
+            log.info("too quiet (rms %.0f); ignoring", audio_rms)
+            return
+
         t_rec = time.perf_counter()
 
         try:
