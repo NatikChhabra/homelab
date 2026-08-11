@@ -26,7 +26,7 @@
 </style>
 </helmet>
 
-<div style="width:1920px; height:1080px; position:relative; overflow:hidden; background:radial-gradient(1100px 800px at 50% 46%, #0A0908 0%, #040404 72%); box-sizing:border-box">
+<div style="position:absolute; inset:0; overflow:hidden; background:radial-gradient(1100px 800px at 50% 46%, #0A0908 0%, #040404 72%); box-sizing:border-box">
 
   <div style="position:absolute; inset:0; opacity:{{ constOp }}; transition:opacity 1.2s ease-out">
     <sc-for list="{{ companions }}" as="c" hint-placeholder-count="9">
@@ -431,6 +431,9 @@ class Component extends DCLogic {
     }));
   }
   removeComp(id) {
+    if (DEFAULT_COMPANIONS.find(c => c.id === id)) return;
+  }
+  _removeComp(id) {
     this.setState(st => {
       const comps = st.comps.filter(c => c.id !== id);
       return { comps, focus: st.focus === id ? (comps[0] ? comps[0].id : null) : st.focus };
@@ -568,7 +571,7 @@ class Component extends DCLogic {
           rowBg: act ? soft : "rgba(255,255,255,.02)",
           rowBd: act ? bd : "rgba(255,255,255,.05)",
           focus: () => this.focusComp(cp.id),
-          remove: () => this.removeComp(cp.id),
+          remove: () => { if (!DEFAULT_COMPANIONS.find(c => c.id === cp.id)) this.removeComp(cp.id); },
           rename: (e) => this.rename(cp.id, e.target.value.toUpperCase())
         };
       }),
