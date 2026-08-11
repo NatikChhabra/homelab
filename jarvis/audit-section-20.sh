@@ -231,6 +231,16 @@ else
   fail "wa-bridge health endpoint NOT responding on port 8097 -- WhatsApp bridge is DOWN"
 fi
 
+# --- call-bridge liveness ------------------------------------------------------
+# Returns JSON even when HFP is not registered; a connection failure means the
+# bridge process is dead, not just unconfigured.
+CALL_STATE=$(curl -s -m 5 http://localhost:8098/call/state 2>/dev/null)
+if printf '%s' "$CALL_STATE" | grep -q '^{'; then
+  ok "call-bridge /call/state responding on port 8098"
+else
+  fail "call-bridge /call/state NOT responding on port 8098 -- call bridge is DOWN"
+fi
+
 # --- VRAM headroom -------------------------------------------------------------
 # Incident: Ollama evicted qwen2.5:3b under memory pressure, causing every
 # LLM call to hit an 8-second cold start. With KEEP_ALIVE=-1 this should not

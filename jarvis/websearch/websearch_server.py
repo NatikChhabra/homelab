@@ -171,7 +171,7 @@ USER_AGENT = os.getenv(
 # engine called "google", it is "google cse". See searxng-settings.yml.
 PRIMARY_ENGINES = frozenset(
     e.strip().lower()
-    for e in os.getenv("WEBSEARCH_PRIMARY_ENGINES", "google cse,wikipedia").split(",")
+    for e in os.getenv("WEBSEARCH_PRIMARY_ENGINES", "duckduckgo,wikipedia").split(",")
     if e.strip()
 )
 
