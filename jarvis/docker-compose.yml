@@ -95,7 +95,7 @@ services:
     # Replies stay English; this is about UNDERSTANDING Hindi, not speaking it.
     command: >-
       --model small-int8
-      --language auto
+      --language en
       --device cuda
       --beam-size 1
     # Shares the 4 GB GPU with Ollama (qwen2.5:3b holds ~2.2 GB, leaving ~1.8).
