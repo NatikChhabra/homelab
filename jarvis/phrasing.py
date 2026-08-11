@@ -160,6 +160,21 @@ _rule(r"^(?:sab|sab\s+kuch)\s+band(?:\s+kar(?:\s+do)?)?$", "turn everything off"
 _rule(r"^shut\s+it\s+all\s+down$", "turn everything off", "same script, other phrasings")
 _rule(r"^(?:good\s*night|goodnight|sone\s+ja\s+raha\s+hoon)$", "good night",
       "script friendly name is 'Good night'")
+# "I'm home" / "im home" / "im back" / "welcome home" -> the HA script
+# The conversation agent expects "I am home", not the friendly name "I'm home".
+_rule(r"^(?:im|i'?m|i\s+am)\s+home$",
+      "I am home",
+      "'im home' / 'I'm home' / 'I am home' -> script form")
+_rule(r"^(?:im|i'?m|i\s+am)\s+back$",
+      "I am home",
+      "'im back' / 'I'm back' -> home script")
+_rule(r"^welcome\s+home$",
+      "I am home",
+      "'welcome home' -> home script")
+# Scene scripts: "movie time" and "fan boost" are exact script names.
+_rule(r"^(?:start\s+)?movie\s+time$", "movie time", "'movie time' script")
+_rule(r"^(?:give\s+)?(?:the\s+)?fan\s+boost$", "fan boost", "'fan boost' script")
+_rule(r"^fan\s+boost$", "fan boost", "same")
 
 # TV is a single toggle; any on/off phrasing means the same button.
 _rule(r"^(?:turn\s+)?(?:the\s+)?t\.?v\.?\s*(?:on|off)$", "toggle the tv",
@@ -189,6 +204,9 @@ _rule(r"^ac\s+(\d{1,2})(?:\s*(?:kar\s+do|karo|rakh\s+do|rakh\s+de))?\s*$",
 # "set ac N" / "set the ac to N" / "set ac to N" -> canonical form the parser accepts
 _rule(r"^set\s+(?:the\s+)?ac\s+(?:to\s+)?(\d{1,2})\s*$",
       lambda m: f"set the ac to {m.group(1)}", "set ac N -> set the ac to N")
+# "ac N degrees" → set AC (covers "ac 22 degrees", "AC 24 degrees", etc.)
+_rule(r"^ac\s+(\d{1,2})\s+degrees?$",
+      lambda m: f"set the ac to {m.group(1)}", "ac N degrees -> set the ac to N")
 # "N degrees" (expanded from "twenty four degrees") → set AC
 _rule(r"^(\d{1,2})\s+degrees?$",
       lambda m: f"set the ac to {m.group(1)}", "N degrees -> set ac to N")
@@ -409,7 +427,7 @@ def normalise(text: str) -> tuple[str, str]:
         m = pattern.match(cleaned)
         if m:
             out = repl(m) if callable(repl) else repl
-            if out.lower() == text.lower():
+            if out == text:
                 return text, ""
             return out, why
     return text, ""

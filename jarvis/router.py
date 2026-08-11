@@ -47,11 +47,13 @@ keeps one id per agent and never crosses them.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -59,6 +61,37 @@ import aiohttp
 from phrasing import looks_like_question, normalise
 
 log = logging.getLogger("jarvis.router")
+
+# --- B3: structured interaction log ------------------------------------------
+# One JSON line per routed turn. Consumed by Phase-3 analytics and router
+# self-tuning. Written to jarvis-interactions.jsonl next to this file.
+_INTERACTION_LOG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "jarvis-interactions.jsonl"
+)
+
+
+def _log_interaction(r: "RouteResult", text: str) -> None:
+    """Append one structured JSON line for this interaction."""
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "transcript": text,
+        "rewritten": r.rewritten or text,
+        "path": r.path,
+        "specialist": r.specialist or "",
+        "tool_calls": r.tool_calls,
+        "local_ms": r.local_ms,
+        "hermes_ms": r.hermes_ms,
+        "llm_ms": r.llm_ms,
+        "total_ms": r.total_ms,
+        "success": r.path in ("local", "hermes", "llm", "greeting"),
+        "fallback_reason": r.fallback_reason,
+        "rewrite_rule": r.rewrite_rule,
+    }
+    try:
+        with open(_INTERACTION_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # don't break the router if the log file is unreadable
 
 # Response types HA uses for a turn that actually did something.
 _SUCCESS_TYPES = ("action_done", "query_answer")
@@ -164,16 +197,18 @@ class IntentRouter:
         token: str,
         local_agent: str = "conversation.home_assistant",
         llm_agent: str = "conversation.jarvis",
-        # 3s: local matcher usually answers in <100ms but HA can take 2-3s
-        # after a cold restart or when intent scripts are heavy (movie_time).
-        local_timeout_s: float = 3.0,
-        # 10s for the LLM agent (conversation.jarvis via Ollama).
-        llm_timeout_s: float = 10.0,
-        # 15s aggregate: local(3s) + Hermes(5-8s when model loaded) + buffer.
-        # When model is evicted, Hermes will timeout at 10s and fail fast
-        # rather than making the user wait 25s. The proactive reload in the
+        # 5s: local matcher usually answers in <100ms but HA can take 5s+
+        # when intent scripts are heavy (movie_time, scene transitions).
+        local_timeout_s: float = 5.0,
+        # 15s for the LLM agent (conversation.jarvis via Ollama).
+        # Measured 10.5s for a typical temperature query; headroom for heavier
+        # intent chains.
+        llm_timeout_s: float = 15.0,
+        # 25s aggregate: local(5s) + Hermes(5-8s when model loaded) + LLM(15s).
+        # When model is evicted, Hermes will timeout at 15s and fail fast
+        # rather than making the user wait 35s. The proactive reload in the
         # Hermes block handles the cold-start case.
-        turn_timeout_s: float = 15.0,
+        turn_timeout_s: float = 25.0,
         enabled: bool = True,
         hermes_enabled: bool | None = None,
     ) -> None:
@@ -338,7 +373,7 @@ class IntentRouter:
         """Route one utterance under a hard aggregate timeout."""
         started = time.perf_counter()
         try:
-            return await asyncio.wait_for(
+            r = await asyncio.wait_for(
                 self._process_impl(session, text, state),
                 timeout=self.turn_timeout_s,
             )
@@ -349,8 +384,9 @@ class IntentRouter:
                 total_ms=round((time.perf_counter() - started) * 1000, 1),
                 fallback_reason="turn_timeout",
             )
-            self.stats.record(r)
-            return r
+        self.stats.record(r)
+        _log_interaction(r, text)
+        return r
 
     async def _process_impl(
         self,
