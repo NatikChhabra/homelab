@@ -168,7 +168,14 @@ function Get-Contacts {
     foreach ($p in $obj.PSObject.Properties) {
         $name = $p.Name.Trim().ToLowerInvariant()
         if ($name -eq '' -or $name.StartsWith('_')) { continue }
-        $number = ([string]$p.Value).Trim()
+        # Support both old string format ("nani": "+91...") and new object
+        # format ("nani": {"name":"Nani","number":"+91...","aliases":[...]}).
+        $val = $p.Value
+        if ($val -is [System.Collections.Generic.Dictionary[string,object]]) {
+            $number = [string]$val['number']
+        } else {
+            $number = ([string]$val).Trim()
+        }
         # Accept only E.164-ish or plain national digits. Reject anything that could
         # smuggle AT commands or shell metacharacters toward the modem.
         if ($number -notmatch '^\+?[0-9]{4,15}$') {
