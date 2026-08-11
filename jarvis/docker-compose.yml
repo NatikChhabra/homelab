@@ -1,6 +1,8 @@
 services:
+services:
+  # Pin images to specific versions for reproducible builds
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama@sha256:b88c73ace3e115f8ec53dc8761ae1c0aabfa675406e3681786b98757ce050f42
     container_name: jarvis-ollama
     restart: always
     ports:
@@ -45,7 +47,7 @@ services:
               capabilities: [gpu]
 
   home-assistant:
-    image: homeassistant/home-assistant:latest
+    image: homeassistant/home-assistant@sha256:6340a3de3917a9b19368e767310a96dd090f6a19aca8aeadf87fd1145cec9682
     container_name: jarvis-hass
     restart: always
     privileged: true
@@ -133,7 +135,7 @@ services:
     # under the rhasspy org (rhasspy/wyoming-kokoro 404s). Piper is the
     # maintained fallback the brief allows. Revisit if a Kokoro Wyoming server
     # turns out to exist elsewhere.
-    image: rhasspy/wyoming-piper:latest
+    image: rhasspy/wyoming-piper@sha256:69b7f797ae3a8c3c0202cbf97152fb795d78c2355de2a31655c20671247360d8
     container_name: jarvis-piper
     restart: always
     # British voice, because Jarvis.
@@ -173,7 +175,7 @@ services:
     # has never existed and was Phase 1's wrong turn). It speaks an
     # OpenAI-compatible HTTP API instead, which is why tts_engine.py talks to it
     # over aiohttp rather than through wyoming_client.py.
-    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    image: ghcr.io/remsky/kokoro-fastapi-gpu@sha256:40f1bca029d98eeff53a5eb4546e7e5576e074b7a3feafbb1fe3defbf1fda64d
     container_name: jarvis-kokoro
     restart: always
     ports:
@@ -209,7 +211,7 @@ services:
     # Self-hosted SearxNG metasearch. The ONLY container that touches external
     # search engines. The websearch agent on port 3101 is the single outbound
     # path from JARVIS; this container is its upstream.
-    image: searxng/searxng:latest
+    image: searxng/searxng@sha256:f4c8e59de166ed71f6380c0847c312ca51f0d41996e31d0559163b6b09ecde52
     container_name: jarvis-searxng
     restart: always
     ports:
@@ -263,7 +265,7 @@ services:
       start_period: 30s
 
   wyoming-openwakeword:
-    image: rhasspy/wyoming-openwakeword:latest
+    image: rhasspy/wyoming-openwakeword@sha256:52cb1168731a1849fc28cf339c935fde58746bbabc94226668a40ef6ddf5d42b
     container_name: jarvis-wake-word
     restart: always
     # hey_jarvis is a pretrained openWakeWord model; nothing to train.

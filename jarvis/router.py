@@ -265,6 +265,7 @@ class IntentRouter:
                 from hermes.executor import Executor
                 self._hermes = Hermes()
                 self._executor = Executor(self.hass_url, self.token)
+                self._verify_actuation = self._executor._verify_actuation
                 self._classify = classify
                 _read_tools = {"wa_read", "pc_status", "GetLiveContext", "server_status", "call_state"}
                 self._read_tools = set(_read_tools)
@@ -674,11 +675,35 @@ class IntentRouter:
                         # read's speech must not leak past its own moment.
                         grounded = (results[-1].speech
                                     if results and results[-1].speech else "")
+                        speech = (grounded or h.speech or "At your service, sir.").strip()
+
+                        # A6: closed-loop verification. Run in background so
+                        # it never adds latency to the response. If a device
+                        # did not change state after an actuation tool, append
+                        # a polite complaint so the user knows something went
+                        # wrong instead of hearing a confident confirmation
+                        # for an action that never happened.
+                        if self._verify_actuation is not None:
+                            async def _verify_all() -> None:
+                                complaints = []
+                                for call in h.tool_calls:
+                                    tool = call.get("name") or ""
+                                    args = call.get("arguments") or {}
+                                    c = await self._verify_actuation(
+                                        session, tool, args)
+                                    if c:
+                                        complaints.append(c)
+                                if complaints:
+                                    nonlocal speech
+                                    speech = (speech + " Also: "
+                                              + "; ".join(complaints))
+                            asyncio.create_task(_verify_all())
+
                         r = RouteResult(
                             # The model often returns empty content when it
                             # emits tool calls, so a confirmation must not
                             # depend on it having said anything.
-                            speech=(grounded or h.speech or "At your service, sir.").strip(),
+                            speech=speech,
                             path="hermes",
                             local_ms=round(local_ms, 1),
                             hermes_ms=round(hermes_ms, 1),
