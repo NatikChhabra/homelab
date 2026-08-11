@@ -121,6 +121,10 @@ JARVIS_BEEP = os.getenv("JARVIS_BEEP", "jarvis_online")
 SILENCE_RMS = float(os.getenv("JARVIS_SILENCE_RMS", "500"))
 SILENCE_HOLD_S = float(os.getenv("JARVIS_SILENCE_HOLD", "0.8"))
 MAX_UTTERANCE_S = float(os.getenv("JARVIS_MAX_UTTERANCE", "20.0"))
+# Heartbeat interval. A missing heartbeat in the log for >2x this interval
+# means ears.py is stuck or the log sink is broken -- both are silent failures
+# that make the whole assistant deaf while Docker reports all containers healthy.
+HEARTBEAT_S = 30
 MIN_UTTERANCE_S = 1.5     # below this it is noise, not a command
 
 # Audio captured BEFORE the wake word fires is kept in a short ring buffer and
@@ -337,10 +341,18 @@ class Ears:
             log.error("no input device found")
             return
 
+        self._reconnect_attempt = 0
         detector = WakeDetector(WAKE_HOST, WAKE_PORT, WAKE_WORD)
         await detector.connect()
         clap = ClapDetector()
         log.info("listening on %s (wake word %r, double-clap)", self.mic_name, WAKE_WORD)
+
+        # Heartbeat: a periodic log line so the watchdog can detect staleness.
+        async def _heartbeat() -> None:
+            while True:
+                await asyncio.sleep(HEARTBEAT_S)
+                log.debug("heartbeat ok")
+        hb_task = asyncio.create_task(_heartbeat())
 
         preroll: deque[bytes] = deque(maxlen=int(PREROLL_S * RATE / BLOCK) + 1)
 
@@ -353,14 +365,16 @@ class Ears:
                     try:
                         await detector.feed(chunk)
                     except Exception as exc:  # noqa: BLE001
-                        log.warning("wake detector dropped (%s); reconnecting", exc)
+                        self._reconnect_attempt += 1
+                        log.warning("wake detector dropped (%s); reconnecting (attempt %d)", exc, self._reconnect_attempt)
                         await detector.close()
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(min(2 ** self._reconnect_attempt, 8))
                         try:
                             await detector.connect()
                         except Exception as exc2:  # noqa: BLE001
                             log.error("wake reconnect failed: %s", exc2)
-                            await asyncio.sleep(2.0)
+                            await asyncio.sleep(min(2 ** (self._reconnect_attempt + 1), 16))
+                        self._reconnect_attempt = 0
                         continue
 
                     fired = detector.poll_detection()
