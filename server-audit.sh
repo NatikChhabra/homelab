@@ -1442,6 +1442,17 @@ if command -v powercfg.exe >/dev/null 2>&1; then
     0) ok "no Modern Standby entries in the last 7 days" ;;
     *) warn "host entered Modern Standby $_ent time(s) in the last 7 days - each one is an outage window with the network down; correlate with any 'terminated' scheduled tasks above" ;;
   esac
+
+  # 4. Firmware-level S0 override. Added 2026-08-12 after keep-awake was green
+  #    while the host still had Kernel-Power 506 entries from Modern Standby.
+  #    PlatformAoAcOverride=0 disables Modern Standby on machines that honor it;
+  #    a missing key means the OS can still enter S0 even with timeouts at 0.
+  _aoac=$(powershell.exe -NoProfile -NonInteractive -Command "try{(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power' -Name PlatformAoAcOverride -ErrorAction Stop).PlatformAoAcOverride}catch{'missing'}" 2>/dev/null | tr -d '\r\n ')
+  case "$_aoac" in
+    0) ok "Modern Standby override is set (PlatformAoAcOverride=0); reboot required before powercfg /a reflects it" ;;
+    missing) warn "Modern Standby override is missing - set HKLM\\SYSTEM\\CurrentControlSet\\Control\\Power\\PlatformAoAcOverride=0 and reboot, or S0 standby can still happen despite green timeouts" ;;
+    *) warn "Modern Standby override has unexpected value '$_aoac' - expected PlatformAoAcOverride=0" ;;
+  esac
 else
   warn "powercfg.exe not on PATH - cannot verify the host is prevented from sleeping"
 fi
