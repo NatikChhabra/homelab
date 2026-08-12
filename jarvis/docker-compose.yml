@@ -60,6 +60,10 @@ services:
     volumes:
       - hass_config:/config
       - /run/dbus:/run/dbus:ro
+      # Bind-mount JARVIS config so custom sentences survive container rebuilds.
+      # These files live in the repo and must not depend on docker cp.
+      - ./ha-config/custom_sentences/en/jarvis.yaml:/config/custom_sentences/en/jarvis.yaml:ro
+      - ./ha-config/packages/jarvis_intents.yaml:/config/packages/jarvis_intents.yaml:ro
     networks:
       - jarvis
     depends_on:
