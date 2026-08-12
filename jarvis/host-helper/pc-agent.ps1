@@ -227,12 +227,24 @@ Add-Type -AssemblyName System.Windows.Forms
 # ------------------------------------------------------- WOL (unchanged) ----
 
 function Resolve-LanInterface {
-    $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-             Sort-Object RouteMetric | Select-Object -First 1
-    if (-not $route) { throw 'no default route found; cannot pick a LAN adapter' }
-    $addr = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop |
-            Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1
-    if (-not $addr) { throw "no usable IPv4 on interface $($route.InterfaceIndex)" }
+    # Find an interface with a non-link-local IPv4 that is actually up.
+    # Relying on the default route alone is wrong: the route can point to a
+    # disconnected Wi-Fi adapter while the wired Ethernet (with a usable IP) is
+    # left unused. InterfaceIndex 8 on this host was the Wi-Fi 2 adapter, media
+    # disconnected, but the default route metric pointed there -- causing 20
+    # retry loops and a FATAL every boot.
+    $found = $null
+    foreach ($nic in (Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.ifIndex -ne 1 })) {
+        $ip = Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+              Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.PrefixLength -ge 16 } |
+              Select-Object -First 1
+        if ($ip) {
+            $found = [pscustomobject]@{ Nic = $nic; IP = $ip }
+            break
+        }
+    }
+    if (-not $found) { throw 'no up interface with usable IPv4 found' }
+    $addr = $found.IP
     $ipBytes = ([Net.IPAddress]::Parse($addr.IPAddress)).GetAddressBytes()
     # Build the netmask byte-by-byte. Do NOT use [uint32]0xFFFFFFFF: PowerShell
     # 5.1 parses that literal as Int32 -1 and the cast throws.
