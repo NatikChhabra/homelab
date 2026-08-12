@@ -112,6 +112,21 @@ _rule(
     "same, with trailing words (politeness); '%' and schedule phrases excluded",
 )
 
+# Fixed fan-intensity phrases. "fan speed high" used to fall through to the
+# model, where cold-load timing made it nondeterministic: sometimes an error,
+# sometimes a slow LLM answer. These are deterministic boost aliases.
+_rule(
+    r"^(?:set\s+|put\s+|make\s+)?(?:the\s+)?fan\s+(?:speed\s+)?(?:to\s+|on\s+|at\s+)?"
+    r"(?:high|max|maximum|boost|full)(?:\s+speed)?$",
+    lambda m: "fan boost",
+    "fan speed high/max/full -> fan boost; avoids nondeterministic LLM fallback",
+)
+_rule(
+    r"^(?:high|max|maximum|boost|full)\s+fan(?:\s+speed)?$",
+    lambda m: "fan boost",
+    "high/max fan -> fan boost; avoids nondeterministic LLM fallback",
+)
+
 # Bare/plural light commands -> the area form.
 #   "turn on the lights", "lights on", "turn the lights on", "all lights on"
 # 'all lights on' is especially important: unrewritten it matches a QUERY intent
