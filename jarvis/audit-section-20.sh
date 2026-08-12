@@ -285,3 +285,21 @@ if printf '%s' "$FB_HTML" | grep -q 'File Browser'; then
 else
   fail "File Browser :8095 NOT responding -- report access path is DOWN"
 fi
+
+# --- Custom sentences in HA container -----------------------------------------
+# Incident 2026-08-12: custom sentences were missing from the running HA
+# container despite existing in the repo. A docker cp fix was applied manually
+# but did not survive container restarts. The fix is now a bind-mount in
+# docker-compose.yml so the files are always present. This check asserts
+# they exist inside the running container.
+if docker exec jarvis-hass test -f /config/custom_sentences/en/jarvis.yaml 2>/dev/null; then
+  ok "custom_sentences/en/jarvis.yaml exists in running HA container"
+else
+  fail "/config/custom_sentences/en/jarvis.yaml MISSING in HA container -- local routing broken"
+fi
+
+if docker exec jarvis-hass test -f /config/packages/jarvis_intents.yaml 2>/dev/null; then
+  ok "packages/jarvis_intents.yaml exists in running HA container"
+else
+  fail "/config/packages/jarvis_intents.yaml MISSING in HA container -- intent handlers broken"
+fi
