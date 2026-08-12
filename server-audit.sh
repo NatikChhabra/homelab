@@ -1367,9 +1367,10 @@ fi
 # The server logged "replies will NOT be checked against Home Assistant" once at
 # startup and then spoke unverified confirmations for hours. The repo looked
 # complete the whole time -- the file existed in git and not in the image.
-if docker logs jarvis-voice 2>&1 | grep -q "closed-loop verification enabled"; then
+_voice_log=$(docker logs jarvis-voice 2>&1)
+if echo "$_voice_log" | grep -q "closed-loop verification enabled"; then
   ok "closed-loop reply verification is enabled"
-elif docker logs jarvis-voice 2>&1 | grep -qi "could not be imported"; then
+elif echo "$_voice_log" | grep -qi "could not be imported"; then
   fail "jarvis-voice could NOT import verify/closed_loop.py - replies are spoken WITHOUT being checked against Home Assistant, so the model can confirm actions it never took"
 else
   warn "cannot tell from jarvis-voice logs whether closed-loop verification is enabled"
