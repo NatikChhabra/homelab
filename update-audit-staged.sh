@@ -1,5 +1,5 @@
 #!/bin/bash
-# Staged by update-audit.sh on 2026-08-11T08:23:29Z.
+# Staged by update-audit.sh on 2026-08-11T23:00:03Z.
 # Run from an INTERACTIVE shell — docker pull needs the credential helper,
 # which fails under Task Scheduler on this host.
 # Only PATCH and MINOR updates are listed. MAJOR / RENAMED are excluded
@@ -8,7 +8,7 @@ set -euo pipefail
 echo 'Backing up config volumes first...'
 bash /c/ServerData/Stacks/backup-volumes.sh
 
-# jarvis-searxng : 2026.8.4-c63835bd2 -> 2026.8.10-0a118066d (PATCH)
+# jarvis-searxng : 2026.8.4-c63835bd2 -> 2026.8.11-e8e710e42 (PATCH)
 cd 'C:\ServerData\Stacks\jarvis' && docker compose pull 'searxng' && docker compose up -d 'searxng'
 
 # glances : v4.5.5 -> v4.5.6 (PATCH)
@@ -28,3 +28,6 @@ cd 'C:\ServerData\Stacks\immich' && docker compose pull 'immich-machine-learning
 
 # vikunja-vikunja-1 : 2.4.0 -> 2.5.0 (MINOR)
 cd 'C:\ServerData\Stacks\vikunja' && docker compose pull 'vikunja' && docker compose up -d 'vikunja'
+
+# cleanuparr : 24.04 -> 2.10.4 (MINOR)
+cd 'C:\ServerData\Stacks\streaming' && docker compose pull 'cleanuparr' && docker compose up -d 'cleanuparr'
