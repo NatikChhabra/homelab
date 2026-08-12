@@ -414,6 +414,13 @@ for t in "ServerData - Rolling Window" "ServerData - Orphan Cleanup" "ServerData
     267009)  ok "task '$t' is running right now" ;;
     267011)  ok "task '$t' has not run yet" ;;
     267014)  warn "task '$t' was terminated (hit its time limit?)" ;;
+    1)
+      if [ "$t" = "ServerData - Update Audit" ] && [ -f /c/ServerData/Stacks/update-audit-staged.sh ]; then
+        ok "task '$t' last result 1 (staged updates waiting -- run update-audit-staged.sh to apply)"
+      else
+        fail "task '$t' last result $r (non-zero = the job failed)"
+      fi
+      ;;
     *)       fail "task '$t' last result $r (non-zero = the job failed)" ;;
   esac
 done
