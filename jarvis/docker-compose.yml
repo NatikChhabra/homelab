@@ -1,5 +1,4 @@
 services:
-services:
   # Pin images to specific versions for reproducible builds
   ollama:
     image: ollama/ollama@sha256:b88c73ace3e115f8ec53dc8761ae1c0aabfa675406e3681786b98757ce050f42
@@ -64,6 +63,9 @@ services:
       # These files live in the repo and must not depend on docker cp.
       - ./ha-config/custom_sentences/en/jarvis.yaml:/config/custom_sentences/en/jarvis.yaml:ro
       - ./ha-config/packages/jarvis_intents.yaml:/config/packages/jarvis_intents.yaml:ro
+      # Bind-mount the system prompt so deploy scripts always read the repo version.
+      # patch_prompt_offline.py expects it at /tmp/jarvis-prompt.txt.
+      - ./jarvis-prompt.txt:/tmp/jarvis-prompt.txt:ro
     networks:
       - jarvis
     depends_on:
