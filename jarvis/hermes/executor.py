@@ -876,6 +876,7 @@ class Executor:
         if not entity_ids:
             return None
         expected = ACTUATION_EXPECTED.get(tool, {})
+        log.info("A6 verify intent=%s args=%s entities=%s", tool, args, entity_ids)
 
         # Snapshot current states.
         before: dict[str, str] = {}
@@ -889,7 +890,9 @@ class Executor:
                     if resp.status == 200:
                         state = await resp.json()
                         before[eid] = str(state.get("state") or "unknown")
+            log.info("A6 verify before=%s", before)
         except Exception:  # noqa: BLE001 - verification failure is not a tool failure
+            log.warning("A6 verify before snapshot failed for %s", tool)
             return None
 
         # Wait for the device to settle.
@@ -907,7 +910,9 @@ class Executor:
                     if resp.status == 200:
                         state = await resp.json()
                         after[eid] = str(state.get("state") or "unknown")
+            log.info("A6 verify after=%s", after)
         except Exception:  # noqa: BLE001
+            log.warning("A6 verify after snapshot failed for %s", tool)
             return None
 
         # Compare.
@@ -916,12 +921,16 @@ class Executor:
                 continue
             if after.get(eid) == exp:
                 continue
-            return f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {after.get(eid, chr(63))}, not {exp}."
+            complaint = f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {after.get(eid, chr(63))}, not {exp}."
+            log.warning("A6 verify FAILED tool=%s entity=%s expected=%s got=%s", tool, eid, exp, after.get(eid, "?"))
+            return complaint
         # For tools without a fixed expected state (good_night), check that
         # at least one entity changed.
         if not expected and all(after.get(eid) == before.get(eid) for eid in entity_ids
                                 if eid in before and eid in after):
+            log.warning("A6 verify FAILED tool=%s no entity changed", tool)
             return "That did not take, Sir. The devices did not change state."
+        log.info("A6 verify OK tool=%s", tool)
         return None
 
     async def _run_call(self, session: aiohttp.ClientSession,

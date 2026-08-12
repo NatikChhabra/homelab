@@ -1367,14 +1367,19 @@ fi
 # The server logged "replies will NOT be checked against Home Assistant" once at
 # startup and then spoke unverified confirmations for hours. The repo looked
 # complete the whole time -- the file existed in git and not in the image.
-_voice_log=$(docker logs jarvis-voice 2>&1)
-if echo "$_voice_log" | grep -q "closed-loop verification enabled"; then
+# Capture to temp file instead of shell variable: the log is >1 MB and exceeds
+# ARG_MAX when passed as an echo argument, which triggers SIGPIPE (exit 141)
+# under pipefail — making grep appear to fail even when the match exists.
+_docker_logs_tmp="/tmp/_audit_docker_logs_$$.txt"
+docker logs jarvis-voice > "$_docker_logs_tmp" 2>&1
+if grep -q "closed-loop verification enabled" "$_docker_logs_tmp"; then
   ok "closed-loop reply verification is enabled"
-elif echo "$_voice_log" | grep -qi "could not be imported"; then
+elif grep -qi "could not be imported" "$_docker_logs_tmp"; then
   fail "jarvis-voice could NOT import verify/closed_loop.py - replies are spoken WITHOUT being checked against Home Assistant, so the model can confirm actions it never took"
 else
   warn "cannot tell from jarvis-voice logs whether closed-loop verification is enabled"
 fi
+rm -f "$_docker_logs_tmp"
 
 
 # ---------------------------------------------------------------------------
