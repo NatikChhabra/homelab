@@ -684,11 +684,13 @@ class IntentRouter:
                         # wrong instead of hearing a confident confirmation
                         # for an action that never happened.
                         if self._verify_actuation is not None:
+                            log.info("A6 dispatching verify for %d tool call(s)", len(h.tool_calls))
                             async def _verify_all() -> None:
                                 complaints = []
                                 for call in h.tool_calls:
                                     tool = call.get("name") or ""
                                     args = call.get("arguments") or {}
+                                    log.info("A6 invoking tool=%s", tool)
                                     c = await self._verify_actuation(
                                         session, tool, args)
                                     if c:
