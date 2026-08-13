@@ -63,6 +63,10 @@ services:
       # These files live in the repo and must not depend on docker cp.
       - ./ha-config/custom_sentences/en/jarvis.yaml:/config/custom_sentences/en/jarvis.yaml:ro
       - ./ha-config/packages/jarvis_intents.yaml:/config/packages/jarvis_intents.yaml:ro
+      # Bind-mount custom_components so the aether_bridge integration is visible
+      # to HA without a manual docker-cp step. The component lives in the repo
+      # and must not depend on container-local copies.
+      - ./ha-config/custom_components:/config/custom_components:ro
       # Bind-mount the system prompt so deploy scripts always read the repo version.
       # patch_prompt_offline.py expects it at /tmp/jarvis-prompt.txt.
       - ./jarvis-prompt.txt:/tmp/jarvis-prompt.txt:ro
