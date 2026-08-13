@@ -151,6 +151,14 @@ def rms(pcm: np.ndarray) -> float:
     return float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
 
 
+# Virtual device name fragments that indicate audio routing hijacks.
+# If ears.py picks one of these, a voice changer or loopback driver is
+# silently intercepting the mic. Log a warning so the user notices.
+_VIRTUAL_FRAGMENTS = frozenset([
+    "clownfish", "cable", "vb-audio", "loopback", "hub",
+    "virtual", "wave", "stub", "fake",
+])
+
 def pick_input(prefer: str | None = None) -> tuple[int | None, str]:
     """Choose a capture device by name substring, falling back to the default."""
     candidates = [(i, d) for i, d in enumerate(sd.query_devices())
@@ -163,10 +171,17 @@ def pick_input(prefer: str | None = None) -> tuple[int | None, str]:
             if "hands-free" in d["name"].lower() and "hands-free" not in want.lower():
                 continue
             if want.lower() in d["name"].lower():
-                return i, d["name"]
+                name = d["name"]
+                # Warn if this looks like a virtual/routed device
+                if any(v in name.lower() for v in _VIRTUAL_FRAGMENTS):
+                    log.warning("SELECTED DEVICE APPEARS VIRTUAL: %s -- check for voice changers, loopback drivers, or audio hubs", name)
+                return i, name
     if candidates:
         i, d = candidates[0]
-        return i, d["name"] + " (first available)"
+        name = d["name"]
+        if any(v in name.lower() for v in _VIRTUAL_FRAGMENTS):
+            log.warning("SELECTED DEVICE APPEARS VIRTUAL: %s -- check for voice changers, loopback drivers, or audio hubs", name)
+        return i, name + " (first available)"
     return None, "NO INPUT DEVICE"
 
 
