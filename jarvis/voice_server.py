@@ -181,6 +181,98 @@ class WakeStream:
         self._reader = self._writer = None
 
 
+class SatelliteSession:
+    """
+    Lightweight wake-word listener for phone/tablet/laptop mic sources.
+
+    Runs a continuous mic→openWakeWord loop in the background, broadcastin
+    detections to all connected HUDs without running STT, routing, or TTS.
+    The existing Session class (the "sacred voice loop") is untouched -- this
+    class lives alongside it and only touches the broadcast channel.
+
+    One SatelliteSession per (websocket, room) pair. Multiple rooms on the
+    same WebSocket are not supported; the client picks one room and reuses
+    the connection for all satellites from that device.
+    """
+
+    CHUNK_S = 0.5  # 500 ms chunks -- matches Session.on_audio granularity
+    CHUNK_BYTES = int(BYTES_PER_SEC * CHUNK_S)  # 16000 bytes at 16 kHz / 16-bit / mono
+
+    def __init__(self, ws: web.WebSocketResponse, room: str, app: web.Application) -> None:
+        self._ws = ws
+        self._room = room
+        self._app = app
+        self._wake = WakeStream(*WAKE, WAKE_WORD)
+        self._task: asyncio.Task[None] | None = None
+        self._cancelled = False
+
+    async def start(self) -> None:
+        """Connect to openWakeWord and launch the feed+detect loop."""
+        try:
+            await self._wake.connect()
+        except OSError as exc:
+            log.warning("satellite (%s): cannot reach wake word service: %s", self._room, exc)
+            await self._ws.send_json({"type": "error", "message": "Wake word service unavailable."})
+            raise
+        self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        """Continuously feed audio chunks and broadcast detections."""
+        buf = b""
+        while not self._cancelled:
+            try:
+                raw = await self._ws.receive()
+            except Exception:
+                break
+            if raw.type != WSMsgType.BINARY:
+                continue
+            buf += raw.data
+            # Send full CHUNK_BYTES-sized slices; keep the remainder.
+            while len(buf) >= self.CHUNK_BYTES:
+                chunk, buf = buf[: self.CHUNK_BYTES], buf[self.CHUNK_BYTES:]
+                await self._wake.feed(chunk)
+            # Non-blocking peek for detection on the wake stream.
+            # We use a short timeout so the feed loop keeps running.
+            try:
+                det = await asyncio.wait_for(self._peek_detection(), timeout=0.05)
+                if det:
+                    await self._broadcast(det)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _peek_detection(self) -> str | None:
+        """Try one detection poll without blocking the feed loop."""
+        try:
+            return await asyncio.wait_for(self._wake.next_detection(), timeout=0.01)
+        except asyncio.TimeoutError:
+            return None
+
+    async def _broadcast(self, name: str) -> None:
+        """Send a wake detection to every connected HUD."""
+        payload = {"type": "satellite_wake", "room": self._room, "name": name}
+        clients: set = self._app.get("clients", set())
+        dead = []
+        for ws in clients:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            clients.discard(ws)
+        log.info("satellite_wake room=%s name=%s clients=%d", self._room, name, len(clients))
+
+    async def stop(self) -> None:
+        """Cancel the feed loop and close the wake connection."""
+        self._cancelled = True
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        await self._wake.close()
+
+
 async def ask_home_assistant(
     session: aiohttp.ClientSession, text: str, conversation_id: str | None
 ) -> tuple[str, str | None]:
@@ -588,6 +680,29 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     if session.state == "wake":
                         session._begin_listening()
                         await session.send_json(type="wake", name="push-to-talk")
+                elif cmd.get("type") == "satellite_start":
+                    # Spawn a background wake-word-only listener for a named room.
+                    # Already-running satellites on this connection are stopped first.
+                    room = (cmd.get("room") or "").strip().lower()
+                    if not room:
+                        await ws.send_json({"type": "error", "message": "satellite_start requires a non-empty room."})
+                        continue
+                    satellites: dict = request.app.setdefault("_satellites", {})
+                    # Teardown any prior satellite on this ws.
+                    old = satellites.pop(id(ws), None)
+                    if old:
+                        await old.stop()
+                    sat = SatelliteSession(ws, room, request.app)
+                    satellites[id(ws)] = sat
+                    await sat.start()
+                    await ws.send_json({"type": "satellite_started", "room": room})
+                    log.info("satellite started room=%s ws=%s", room, id(ws))
+                elif cmd.get("type") == "satellite_stop":
+                    satellites: dict = request.app.setdefault("_satellites", {})
+                    old = satellites.pop(id(ws), None)
+                    if old:
+                        await old.stop()
+                    await ws.send_json({"type": "satellite_stopped", "room": getattr(old, "_room", "") if old else ""})
                 elif cmd.get("type") == "text":
                     # Typed command: skips STT, still exercises intent + TTS.
                     # It goes through the SAME verification gate as speech --
@@ -614,6 +729,11 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg.type == WSMsgType.ERROR:
                 log.warning("websocket error: %s", ws.exception())
     finally:
+        # Clean up any active satellite before closing the session.
+        satellites: dict = request.app.setdefault("_satellites", {})
+        old = satellites.pop(id(ws), None)
+        if old:
+            await old.stop()
         request.app["clients"].discard(ws)
         await session.close()
 
@@ -1111,6 +1231,10 @@ def build_app() -> web.Application:
         web.post("/api/toggle", toggle),
         web.get("/ws", ws_handler),
         web.static("/static", STATIC_DIR),
+        # PWA shell: /shell/pwa/ serves the phone-first installable app.
+        # STATIC_DIR is /app/ui; files sit at /app/ui/shell/pwa/, so mount
+        # /shell with the shell/ subdirectory as root.
+        web.static("/shell", os.path.join(STATIC_DIR, "shell")),
     ])
     # Panels, the display-directive channel, and the allowlisted actuation
     # endpoint. Registered last and entirely additively: every route it adds is
