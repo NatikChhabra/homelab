@@ -66,6 +66,12 @@ services:
       # Bind-mount the system prompt so deploy scripts always read the repo version.
       # patch_prompt_offline.py expects it at /tmp/jarvis-prompt.txt.
       - ./jarvis-prompt.txt:/tmp/jarvis-prompt.txt:ro
+    env_file:
+      - ../secrets.env
+      - ./secrets.env
+    # Home Assistant reads JARVIS_BRIDGE_TOKEN from env for the aether_bridge
+    # integration; the token is in secrets.env alongside JARVIS_HASS_TOKEN.
+    # Loading both files keeps the host-side and stack-side token lists in sync.
     networks:
       - jarvis
     depends_on:
