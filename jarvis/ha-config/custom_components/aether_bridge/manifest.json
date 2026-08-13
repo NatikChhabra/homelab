@@ -1,0 +1,11 @@
+{
+  "domain": "aether_bridge",
+  "name": "Aether Bridge",
+  "codeowners": [],
+  "dependencies": ["conversation"],
+  "documentation": "https://github.com/natikrajput/aether",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}

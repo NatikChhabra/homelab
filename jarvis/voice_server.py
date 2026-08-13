@@ -62,6 +62,9 @@ log = logging.getLogger("jarvis")
 HASS_URL = os.getenv("HASS_URL", "http://jarvis-hass:8123").rstrip("/")
 # Accept either name: the repo's secrets.env already uses HA_API_TOKEN.
 HASS_TOKEN = os.getenv("JARVIS_HASS_TOKEN") or os.getenv("HA_API_TOKEN", "")
+# Restricted token for the Aether Bridge /turn endpoint. Separate from
+# JARVIS_HASS_TOKEN so a compromised satellite cannot reach the full HA API.
+BRIDGE_TOKEN = os.getenv("JARVIS_BRIDGE_TOKEN", "")
 
 WHISPER = (os.getenv("WHISPER_HOST", "jarvis-whisper"), int(os.getenv("WHISPER_PORT", "10300")))
 PIPER = (os.getenv("PIPER_HOST", "jarvis-piper"), int(os.getenv("PIPER_PORT", "10200")))
@@ -351,6 +354,32 @@ async def route_utterance(
     else:
         log.info("routed %s in %.1f ms (local rejected: %s)",
                  result.path.upper(), result.total_ms, result.fallback_reason or "-")
+    return result.speech, result
+
+
+# Shared HTTP session for the Aether Bridge /turn endpoint. One session
+# per process is fine — the bridge path is low-volume and sequential.
+_bridge_http: aiohttp.ClientSession | None = None
+
+
+async def route_utterance_satellite(
+    text: str, tier: str, state: dict[str, str | None]
+) -> tuple[str, RouteResult]:
+    """Route a satellite utterance with tier enforcement. See router.py."""
+    if _bridge_http is None:
+        return ("I am not ready yet, sir.", RouteResult(
+            speech="System not ready.", path="error", total_ms=0.0,
+        ))
+    result = await ROUTER.process(
+        _bridge_http, text, state, tier=tier
+    )
+    if result.path == "local":
+        log.info("satellite LOCAL in %.1f ms%s", result.total_ms,
+                 f" (rewritten: {result.rewritten!r})" if result.rewritten else "")
+    else:
+        log.info("satellite %s in %.1f ms (local rejected: %s, tier=%s)",
+                 result.path.upper(), result.total_ms,
+                 result.fallback_reason or "-", tier)
     return result.speech, result
 
 
@@ -1078,6 +1107,39 @@ async def toggle(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "unreachable"}, status=502)
 
 
+async def turn(request: web.Request) -> web.Response:
+    """Satellite utterance endpoint for the Aether Bridge.
+
+    Used by Home Assistant's custom conversation agent to forward voice input
+    from satellite devices (Voice PE, etc.) through the full JARVIS pipeline
+    with tier-based permission enforcement.
+    """
+    auth = request.headers.get("Authorization", "")
+    expected = f"Bearer {BRIDGE_TOKEN}"
+    if not BRIDGE_TOKEN or auth != expected:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return web.json_response({"error": "bad-json"}, status=400)
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "empty-text"}, status=400)
+
+    tier = str(body.get("tier") or "owner")
+    if tier not in ("guest", "owner"):
+        tier = "owner"
+
+    speech, result = await route_utterance_satellite(text, tier, {})
+    return web.json_response({
+        "speech": speech,
+        "path": result.path,
+        "total_ms": result.total_ms,
+    })
+
+
 async def _prewarm_hermes(session: aiohttp.ClientSession) -> None:
     """Warm Ollama and Hermes before the first real request.
 
@@ -1140,6 +1202,8 @@ async def _ollama_keepalive_forever(session: aiohttp.ClientSession) -> None:
 
 async def on_startup(app: web.Application) -> None:
     app["http"] = aiohttp.ClientSession()
+    global _bridge_http
+    _bridge_http = aiohttp.ClientSession()
     # Global voice state for the HUD: the aggregate of all connected sessions.
     # Rainmeter reads this once per second; the browser HUD reads it in real
     # time over the same channel as everything else.
@@ -1191,6 +1255,9 @@ async def on_cleanup(app: web.Application) -> None:
     if verifier is not None:
         await verifier.close()
     await app["http"].close()
+    if _bridge_http is not None:
+        await _bridge_http.close()
+        _bridge_http = None
 
 
 
@@ -1229,6 +1296,7 @@ def build_app() -> web.Application:
         web.get("/api/vitals", vitals),
         web.get("/api/devices", devices),
         web.post("/api/toggle", toggle),
+        web.post("/turn", turn),
         web.get("/ws", ws_handler),
         web.static("/static", STATIC_DIR),
         # PWA shell: /shell/pwa/ serves the phone-first installable app.

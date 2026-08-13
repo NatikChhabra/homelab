@@ -74,3 +74,4 @@ secrets.env
 ui/shell/pwa/*.png
 !ui/shell/pwa/manifest.json
 *.json
+!ha-config/custom_components/aether_bridge/manifest.json
