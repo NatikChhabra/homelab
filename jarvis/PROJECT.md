@@ -1,6 +1,6 @@
 # PROJECT.md — Aether Bridge, current state
 
-**Last updated:** 2026-08-13 IST
+**Last updated:** 2026-08-13 18:47 IST
 **Rollback in one line:** `docker compose -f Stacks/jarvis/docker-compose.yml up -d` (drops the env_file change if needed; rebuild drops the bridge image)
 
 ---
@@ -24,9 +24,9 @@
 
 | Item | Blocker |
 |------|---------|
-| `JARVIS_BRIDGE_TOKEN` in `secrets.env` | **User action in progress** — HA user `aether_bridge` created, token minted, being typed into file |
+| `JARVIS_BRIDGE_TOKEN` in `secrets.env` | **User action in progress** — HA user `aether_bridge` created, token minted, being typed into file; first "token is in" was FALSE FIRE (unsaved editor) — retrying with local presence check |
 | `jarvis-voice` rebuilt with bridge code | Stale image (built09:34 UTC) predates commits `29283d2`; needs `up -d --build jarvis-voice` |
-| `jarvis-hass` recreated with env_file | Compose change committed (`6a9e504`) but container not yet restarted |
+| `jarvis-hass` recreated with env_file + bind mount | Compose changes committed (`6a9e504`, `6a9d8de`) but container not yet restarted |
 | Step 3 acceptance battery | Blocked on token + rebuild |
 | Voice PE → `/turn` → kernel pipeline | Unverified end-to-end |
 
@@ -37,6 +37,8 @@
 | Commit | Subject |
 |--------|---------|
 | `6a9e504` | fix(compose): add env_file to home-assistant for JARVIS_BRIDGE_TOKEN |
+| `6a9d8de` | fix(compose): bind-mount custom_components into home-assistant for aether_bridge |
+| `99b49f2` | docs: add PROJECT.md with bridge state, debt ledger, deploy command, verification set |
 | `29283d2` | feat(bridge): add aether_bridge HA integration and guest-tier enforcement |
 | `2e1c435` | feat(ears): add virtual-device detection warning; refresh update-audit-staged.sh |
 | `b75e202` | feat(a6): add per-actuation logging and fix audit detection |
