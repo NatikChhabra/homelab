@@ -96,6 +96,19 @@ def _log_interaction(r: "RouteResult", text: str) -> None:
 # Response types HA uses for a turn that actually did something.
 _SUCCESS_TYPES = ("action_done", "query_answer")
 
+# Guest-tier deny list: Hermes tool names that satellite mics must never
+# execute. Mirrors the same list in custom_components/aether_bridge/const.py.
+# If a new driver tool is added that a guest should not have, add it here.
+GUEST_DENY_LIST: frozenset[str] = frozenset({
+    "pc_type",
+    "pc_power",
+    "pc_app",
+    "wa_send",
+    "call_make",
+    "call_answer",
+    "call_reject",
+})
+
 
 @dataclass
 class RouteResult:
@@ -370,12 +383,17 @@ class IntentRouter:
         session: aiohttp.ClientSession,
         text: str,
         state: dict[str, str | None],
+        tier: str = "owner",
     ) -> RouteResult:
-        """Route one utterance under a hard aggregate timeout."""
+        """Route one utterance under a hard aggregate timeout.
+
+        `tier` gates which tools are allowed: "owner" (default) allows all,
+        "guest" blocks the deny list in GUEST_DENY_LIST.
+        """
         started = time.perf_counter()
         try:
             r = await asyncio.wait_for(
-                self._process_impl(session, text, state),
+                self._process_impl(session, text, state, tier=tier),
                 timeout=self.turn_timeout_s,
             )
         except asyncio.TimeoutError:
@@ -394,6 +412,7 @@ class IntentRouter:
         session: aiohttp.ClientSession,
         text: str,
         state: dict[str, str | None],
+        tier: str = "owner",
     ) -> RouteResult:
         """
         Route one utterance.
@@ -600,6 +619,33 @@ class IntentRouter:
                     # that nothing performed.
                     hermes_reason = "no_tool_call"
                 else:
+                    # Guest-tier enforcement: block deny-listed tools before
+                    # they reach the executor. A guest satellite mic must never
+                    # be able to type on the PC, send WhatsApp messages, or
+                    # place calls — those are owner-only verbs.
+                    if tier == "guest":
+                        denied = [
+                            call.get("name") or ""
+                            for call in h.tool_calls
+                            if (call.get("name") or "") in GUEST_DENY_LIST
+                        ]
+                        if denied:
+                            r = RouteResult(
+                                speech=(
+                                    f"I cannot {denied[0]} from this mic, sir. "
+                                    "That is not allowed here."
+                                ),
+                                path="refused",
+                                local_ms=round(local_ms, 1),
+                                hermes_ms=round((time.perf_counter() - t_h) * 1000, 1),
+                                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                                fallback_reason=reason,
+                                specialist=specialist,
+                                tool_calls=len(h.tool_calls),
+                                hermes_reason=f"guest_denied:{','.join(denied)}",
+                            )
+                            self.stats.record(r)
+                            return r
                     results = await self._executor.run(session, h.tool_calls)
                     n_calls = len(results)
                     failed = [r for r in results if not r.ok]
