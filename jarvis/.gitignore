@@ -1,15 +1,76 @@
-secrets.env
-*.db
-*.log
+# Allowlist, not a denylist.
+#
+# Everything is ignored by default and specific things are added back below.
+# This is deliberate: a denylist fails open, and the one file that must never
+# reach a remote (secrets.env, which holds the qBittorrent password and every
+# *arr API key) would be committed the moment someone adds a new file type
+# nobody thought to exclude. An allowlist fails closed instead.
+#
+# Before the first push, verify with:  git status --ignored
+*
 
-# Tailscale certs. `tailscale cert <domain>` writes the cert AND PRIVATE KEY into
-# the current working directory with no prompt -- on 2026-08-08 that dropped a
-# private key straight into this folder, which is staged for a PUBLIC repo.
-# Never commit these; regenerate with `tailscale cert` if one is ever needed.
-*.key
-*.crt
-*.pem
-*ts.net*
-tuya-watchdog-state.json
-__pycache__/
-*.pyc
+# --- structure ---------------------------------------------------------------
+!.gitignore
+!README.md
+!LICENSE
+!*/
+
+# --- the actual stack definitions --------------------------------------------
+!*/docker-compose.yml
+
+# --- automation --------------------------------------------------------------
+!*.sh
+!*.ps1
+!*.py
+!glances-kiosk.bat
+
+# Config files a compose file bind-mounts. server-room/glances.conf was ignored
+# by the catch-all above while server-room/docker-compose.yml required it, so a
+# clone-and-up rebuilt a BROKEN Glances: Docker Desktop auto-creates a directory
+# at a bind-mount path whose source is missing, and `glances -C <directory>`
+# does not fail loudly -- it silently reverts to the defaults the config exists
+# to correct (empty sensors panel, three fake 1TB disks). The file also sits
+# outside backup-volumes.sh's BIND_DIRS, so the live C: drive was its only copy.
+# Any *.conf a stack mounts belongs in git for exactly this reason.
+!*.conf
+
+# The pre-commit secret guard has no extension, so the allowlist above would
+# drop it. Enable it after cloning with: git config core.hooksPath .githooks
+!.githooks/pre-commit
+
+# --- templates (never the real thing) ----------------------------------------
+!*.example
+
+# --- re-ignore anything the broad rules above would let back in ---------------
+# secrets.env holds live credentials. homarr/.env holds the key that decrypts
+# every integration credential Homarr stores.
+secrets.env
+.env
+*.env
+!*.env.example
+
+# Editor/agent scratch space, not infrastructure.
+.claude/
+.agents/
+.vscode/
+
+# Superseded copies of scripts. rolling-window.sh.bak-20260727 is a 30K
+# snapshot of an older revision; git is the history mechanism now.
+*.bak
+*.bak-*
+*.orig
+*.prev-*
+
+# Runtime state and generated output. These churn constantly and several of
+# them (server-audit-report.txt, rolling-window.log) describe the media library
+# in detail. watched-ledger.txt is irreplaceable operational state and is
+# covered by the nightly backup, not by git.
+*.log
+*.txt
+
+# PWA shell: installable phone app lives under ui/shell/pwa/.
+# manifest.json must be committed for installability; icons are small PNGs.
+!ui/shell/
+ui/shell/pwa/*.png
+!ui/shell/pwa/manifest.json
+*.json
