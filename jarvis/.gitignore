@@ -12,6 +12,7 @@
 # --- structure ---------------------------------------------------------------
 !.gitignore
 !README.md
+!PROJECT.md
 !LICENSE
 !*/
 
