@@ -115,6 +115,14 @@ def _log_interaction(r: "RouteResult", text: str) -> None:
         "success": r.path in ("local", "hermes", "llm", "greeting"),
         "fallback_reason": r.fallback_reason,
         "rewrite_rule": r.rewrite_rule,
+        "speech": r.speech,
+        "hermes_reason": r.hermes_reason or "",
+        # Speaker verification fields (v18).
+        "speaker_id": r.speaker_id,
+        "speaker_score": r.speaker_score,
+        "speaker_margin": r.speaker_margin,
+        "speaker_ms": r.speaker_ms,
+        "speaker_tier": r.speaker_tier,
     }
     try:
         with open(_INTERACTION_LOG, "a", encoding="utf-8") as f:
