@@ -30,7 +30,8 @@ import os
 import sys
 import time
 
-sys.path.insert(0, "/app")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import aiohttp  # noqa: E402
 
