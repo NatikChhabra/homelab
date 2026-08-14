@@ -42,6 +42,7 @@ import wyoming_client as wy
 import tts_engine
 import hud
 from router import IntentRouter, RouteResult
+import speaker_model
 
 # verify/ is a sibling package directory; it holds the closed-loop check and its
 # tests. Imported by path so the module keeps working whether the server is run
@@ -62,6 +63,7 @@ log = logging.getLogger("jarvis")
 HASS_URL = os.getenv("HASS_URL", "http://jarvis-hass:8123").rstrip("/")
 # Accept either name: the repo's secrets.env already uses HA_API_TOKEN.
 HASS_TOKEN = os.getenv("JARVIS_HASS_TOKEN") or os.getenv("HA_API_TOKEN", "")
+
 # Restricted token for the Aether Bridge /turn endpoint. Separate from
 # JARVIS_HASS_TOKEN so a compromised satellite cannot reach the full HA API.
 BRIDGE_TOKEN = os.getenv("JARVIS_BRIDGE_TOKEN", "")
@@ -344,16 +346,24 @@ ROUTER = IntentRouter(
 
 
 async def route_utterance(
-    session: aiohttp.ClientSession, text: str, state: dict[str, str | None]
+    session: aiohttp.ClientSession, text: str, state: dict[str, str | None],
+    pcm: bytes = b"", device_id: str = "",
 ) -> tuple[str, RouteResult]:
     """Route one utterance and return (reply, result). See router.py."""
-    result = await ROUTER.process(session, text, state)
+    result = await ROUTER.process(session, text, state, pcm=pcm, device_id=device_id)
     if result.path == "local":
         log.info("routed LOCAL in %.1f ms%s", result.total_ms,
                  f" (rewritten: {result.rewritten!r})" if result.rewritten else "")
     else:
         log.info("routed %s in %.1f ms (local rejected: %s)",
                  result.path.upper(), result.total_ms, result.fallback_reason or "-")
+    # Log speaker verification result when available.
+    if result.speaker_id is not None:
+        log.info(
+            "speaker: id=%s score=%.3f margin=%.3f tier=%s ms=%.1f",
+            result.speaker_id, result.speaker_score,
+            result.speaker_margin, result.speaker_tier, result.speaker_ms,
+        )
     return result.speech, result
 
 
@@ -363,7 +373,8 @@ _bridge_http: aiohttp.ClientSession | None = None
 
 
 async def route_utterance_satellite(
-    text: str, tier: str, state: dict[str, str | None]
+    text: str, tier: str, state: dict[str, str | None],
+    pcm: bytes = b"", device_id: str = "",
 ) -> tuple[str, RouteResult]:
     """Route a satellite utterance with tier enforcement. See router.py."""
     if _bridge_http is None:
@@ -371,7 +382,7 @@ async def route_utterance_satellite(
             speech="System not ready.", path="error", total_ms=0.0,
         ))
     result = await ROUTER.process(
-        _bridge_http, text, state, tier=tier
+        _bridge_http, text, state, tier=tier, pcm=pcm, device_id=device_id
     )
     if result.path == "local":
         log.info("satellite LOCAL in %.1f ms%s", result.total_ms,
@@ -529,6 +540,19 @@ class Session:
         try:
             await self.send_json(type="thinking", stage="stt")
             t0 = time.monotonic()
+            # AMENDMENT A: run Whisper transcription and speaker embedding
+            # extraction concurrently on the same PCM buffer. The router joins
+            # both results before tier resolution.
+            device_id = (
+                self.ws.remote_address[0]
+                if getattr(self.ws, "remote_address", None)
+                else ""
+            )
+            sm = speaker_model.get_speaker_model()
+            if sm and sm.is_available() and len(pcm) >= int(speaker_model._MIN_UTTERANCE_S * wy.RATE * wy.WIDTH * wy.CHANNELS):
+                speaker_task = asyncio.create_task(sm.verify(pcm))
+            else:
+                speaker_task = None
             text = await wy.transcribe(*WHISPER, pcm)
             stt_ms = int((time.monotonic() - t0) * 1000)
 
@@ -543,6 +567,18 @@ class Session:
             # the spoken one instead of trailing it.
             await self.show(text)
 
+            # Wait for speaker verification to finish (already running in parallel).
+            speaker_result = None
+            if speaker_task is not None:
+                speaker_result = await speaker_task
+                log.info(
+                    "speaker: id=%s score=%.3f margin=%.3f ms=%.1f",
+                    speaker_result.speaker_id,
+                    speaker_result.score,
+                    speaker_result.margin,
+                    speaker_result.speaker_ms,
+                )
+
             await self.send_json(type="thinking", stage="intent")
             t1 = time.monotonic()
             # Wall-clock, not monotonic: it is compared against Home Assistant's
@@ -550,7 +586,10 @@ class Session:
             # command. The two containers share the host clock -- MEASURED skew
             # is 2 ms, so the comparison is safe.
             issued_at = time.time()
-            reply, route = await route_utterance(self.http, text, self.route_state)
+            reply, route = await route_utterance(
+                self.http, text, self.route_state,
+                pcm=pcm, device_id=device_id,
+            )
             intent_ms = int((time.monotonic() - t1) * 1000)
             log.info("reply (%d ms, %s): %s", intent_ms, route.path, reply)
 
@@ -742,7 +781,12 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         issued_at = time.time()
                         await session.show(cmd.get("text", ""))
                         reply, route = await route_utterance(
-                            session.http, cmd.get("text", ""), session.route_state
+                            session.http, cmd.get("text", ""), session.route_state,
+                            device_id=(
+                                session.ws.remote_address[0]
+                                if getattr(session.ws, "remote_address", None)
+                                else ""
+                            ),
                         )
                         reply, verdict = await session._verify(reply, issued_at)
                         await session.send_json(
@@ -1201,8 +1245,8 @@ async def _ollama_keepalive_forever(session: aiohttp.ClientSession) -> None:
 
 
 async def on_startup(app: web.Application) -> None:
-    app["http"] = aiohttp.ClientSession()
     global _bridge_http
+    app["http"] = aiohttp.ClientSession()
     _bridge_http = aiohttp.ClientSession()
     # Global voice state for the HUD: the aggregate of all connected sessions.
     # Rainmeter reads this once per second; the browser HUD reads it in real
@@ -1258,7 +1302,6 @@ async def on_cleanup(app: web.Application) -> None:
     if _bridge_http is not None:
         await _bridge_http.close()
         _bridge_http = None
-
 
 
 # HUD skin download -- one click for the Rainmeter package.

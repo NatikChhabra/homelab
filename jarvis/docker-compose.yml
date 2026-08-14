@@ -370,6 +370,10 @@ services:
       # Screenshots directory: captures_screen.py writes here on the host,
       # mounted into the container so /api/hud/screen can serve them.
       - ./screenshots:/app/screenshots
+      # Speaker profiles: enrollment writes here on the host; the container
+      # reads it read-only and reloads on file change. A rebuild is never
+      # required after enrolling a new speaker.
+      - ./speakers:/app/speakers:ro
     networks:
       - jarvis
     depends_on:
