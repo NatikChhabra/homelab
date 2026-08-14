@@ -83,3 +83,7 @@ ui/shell/pwa/*.png
 speakers/profiles.yaml
 speakers/identities.yaml
 models/
+
+# Python bytecode — generated, never commit.
+__pycache__/
+*.pyc
