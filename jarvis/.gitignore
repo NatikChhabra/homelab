@@ -76,3 +76,10 @@ ui/shell/pwa/*.png
 !ui/shell/pwa/manifest.json
 *.json
 !ha-config/custom_components/aether_bridge/manifest.json
+
+# Speaker verification: profiles.yaml holds biometric-adjacent data (embeddings).
+# Never commit. The ONNX model weights are large and host-specific; also excluded.
+!speakers/
+speakers/profiles.yaml
+speakers/identities.yaml
+models/

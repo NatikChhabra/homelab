@@ -62,6 +62,35 @@ from phrasing import looks_like_question, normalise
 
 log = logging.getLogger("jarvis.router")
 
+# Speaker verification — imported lazily so a missing speaker_model module
+# does not break the router when speaker id is disabled.
+_SPEAKER_MODEL = None
+
+
+def _get_speaker_model():
+    """Lazy import; returns None if speaker_model is unavailable."""
+    global _SPEAKER_MODEL
+    if _SPEAKER_MODEL is None:
+        try:
+            from speaker_model import get_speaker_model  # type: ignore
+            _SPEAKER_MODEL = get_speaker_model()
+        except ImportError:
+            _SPEAKER_MODEL = None
+    return _SPEAKER_MODEL
+
+# Guest-tier deny list: Hermes tool names that satellite mics must never
+# execute. Mirrors the same list in custom_components/aether_bridge/const.py.
+# If a new driver tool is added that a guest should not have, add it here.
+GUEST_DENY_LIST: frozenset[str] = frozenset({
+    "pc_type",
+    "pc_power",
+    "pc_app",
+    "wa_send",
+    "call_make",
+    "call_answer",
+    "call_reject",
+})
+
 # --- B3: structured interaction log ------------------------------------------
 # One JSON line per routed turn. Consumed by Phase-3 analytics and router
 # self-tuning. Written to jarvis-interactions.jsonl next to this file.
@@ -96,19 +125,6 @@ def _log_interaction(r: "RouteResult", text: str) -> None:
 # Response types HA uses for a turn that actually did something.
 _SUCCESS_TYPES = ("action_done", "query_answer")
 
-# Guest-tier deny list: Hermes tool names that satellite mics must never
-# execute. Mirrors the same list in custom_components/aether_bridge/const.py.
-# If a new driver tool is added that a guest should not have, add it here.
-GUEST_DENY_LIST: frozenset[str] = frozenset({
-    "pc_type",
-    "pc_power",
-    "pc_app",
-    "wa_send",
-    "call_make",
-    "call_answer",
-    "call_reject",
-})
-
 
 @dataclass
 class RouteResult:
@@ -127,6 +143,12 @@ class RouteResult:
     specialist: str = ""       # which specialist classify() picked
     tool_calls: int = 0        # how many calls it dispatched
     hermes_reason: str = ""     # why Hermes did not win, "" when it did
+    # --- Speaker verification (SPEAKER-ID LANE v1)
+    speaker_id: str | None = None    # enrolled name, None if unknown/unmatched
+    speaker_score: float = 0.0       # cosine vs best match (0..1)
+    speaker_margin: float = 0.0      # gap to runner-up
+    speaker_ms: float = 0.0          # wall-clock embed extraction time
+    speaker_tier: str = "owner"      # tier resolved from speaker identity
 
 
 @dataclass
@@ -384,13 +406,39 @@ class IntentRouter:
         text: str,
         state: dict[str, str | None],
         tier: str = "owner",
+        pcm: bytes = b"",
+        device_id: str = "",
     ) -> RouteResult:
         """Route one utterance under a hard aggregate timeout.
 
         `tier` gates which tools are allowed: "owner" (default) allows all,
         "guest" blocks the deny list in GUEST_DENY_LIST.
+
+        If `pcm` is provided (16 kHz mono int16), speaker verification runs
+        concurrently with the routing decision and the resolved speaker tier
+        overrides the passed-in tier. Shadow mode (enforce=false in
+        profiles.yaml) logs the score but does not gate.
         """
         started = time.perf_counter()
+        # Resolve speaker tier before routing, if pcm is available.
+        speaker_result = None
+        if pcm:
+            sm = _get_speaker_model()
+            if sm and sm.is_available():
+                speaker_result = sm.verify(pcm)
+                # In shadow mode (enforce=false), speaker tier is "owner" but
+                # we still attach the verification fields for logging.
+                resolved_tier = sm.tier_from_speaker(speaker_result, device_id)
+                if resolved_tier != tier:
+                    log.info(
+                        "speaker tier override: %s score=%.3f margin=%.3f -> %s (was %s)",
+                        speaker_result.speaker_id or "unknown",
+                        speaker_result.score,
+                        speaker_result.margin,
+                        resolved_tier,
+                        tier,
+                    )
+                    tier = resolved_tier
         try:
             r = await asyncio.wait_for(
                 self._process_impl(session, text, state, tier=tier),
@@ -403,6 +451,13 @@ class IntentRouter:
                 total_ms=round((time.perf_counter() - started) * 1000, 1),
                 fallback_reason="turn_timeout",
             )
+        # Attach speaker fields if we ran verification.
+        if speaker_result is not None:
+            r.speaker_id = speaker_result.speaker_id
+            r.speaker_score = speaker_result.score
+            r.speaker_margin = speaker_result.margin
+            r.speaker_ms = speaker_result.speaker_ms
+            r.speaker_tier = tier
         self.stats.record(r)
         _log_interaction(r, text)
         return r
@@ -633,15 +688,13 @@ class IntentRouter:
                             r = RouteResult(
                                 speech=(
                                     f"I cannot {denied[0]} from this mic, sir. "
-                                    "That is not allowed here."
+                                    f"That is not allowed here."
                                 ),
                                 path="refused",
                                 local_ms=round(local_ms, 1),
                                 hermes_ms=round((time.perf_counter() - t_h) * 1000, 1),
                                 total_ms=round((time.perf_counter() - started) * 1000, 1),
-                                fallback_reason=reason,
-                                specialist=specialist,
-                                tool_calls=len(h.tool_calls),
+                                fallback_reason="guest_denied",
                                 hermes_reason=f"guest_denied:{','.join(denied)}",
                             )
                             self.stats.record(r)
