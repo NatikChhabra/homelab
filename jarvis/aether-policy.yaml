@@ -1,0 +1,95 @@
+# aether-policy.yaml — Aether permission model v1
+#
+# Single source of truth for guest-tier enforcement.
+# Replaces the hardcoded GUEST_DENY_LIST in router.py and const.py.
+#
+# Schema:
+#   identities: map of identity -> {default_verdict, key_fingerprints}
+#   rules: list of {when: {capability, target_device, source_device?}, then: verdict}
+#
+# Verdicts: allow, confirm, notify-owner, deny
+# Fail-closed: no match -> deny
+#
+# Load at startup. No runtime watch. Change requires restart.
+
+identities:
+  owner:
+    description: "Primary user — full access"
+    key_fingerprints: []
+    default_verdict: allow
+
+  family:
+    description: "Family members — limited access"
+    key_fingerprints: []
+    default_verdict: confirm
+
+  guest:
+    description: "Guest satellites — minimal access"
+    key_fingerprints: []
+    default_verdict: deny
+
+  appliance:
+    description: "Automated devices — read-only"
+    key_fingerprints: []
+    default_verdict: deny
+
+rules:
+  # --- Lights: owner and family can toggle, guest can too (low risk) -------
+  - when:
+      capability: "ha_turn_on"
+      target_device: "light.*"
+    then: allow
+
+  - when:
+      capability: "ha_turn_off"
+      target_device: "light.*"
+    then: allow
+
+  - when:
+      capability: "ha_call_service"
+      target_device: "script.fan*"
+    then: allow
+
+  - when:
+      capability: "ha_call_service"
+      target_device: "script.ac*"
+    then: allow
+
+  - when:
+      capability: "ha_call_service"
+      target_device: "scene.*"
+    then: allow
+
+  # --- PC: owner only ------------------------------------------------------
+  - when:
+      capability: "pc_type"
+    then: deny
+
+  - when:
+      capability: "pc_power"
+    then: deny
+
+  - when:
+      capability: "pc_app"
+    then: deny
+
+  # --- WhatsApp: owner only, family needs confirm --------------------------
+  - when:
+      capability: "wa_send"
+    then: deny
+
+  # --- Calls: owner only ---------------------------------------------------
+  - when:
+      capability: "call_make"
+    then: deny
+
+  - when:
+      capability: "call_answer"
+    then: deny
+
+  - when:
+      capability: "call_reject"
+    then: deny
+
+  # --- Default: deny (fail-closed) -----------------------------------------
+  # Any capability not explicitly listed above defaults to deny.
