@@ -6,8 +6,8 @@ Why this file exists
 The router has three offline-testable layers before any network call:
 
   1. Greeting fast-path  (_GREETING_RE in router.py)
-  2. Normalisation       (phrasing.py::normalise)
-  3. Specialist classify (hermes/hermes.py::classify)
+  2. Normalisation       (kernel/phrasing.py::normalise)
+  3. Specialist classify (kernel/hermes/hermes.py::classify)
 
 Layers 2 and 3 are pure functions — no HA, no Ollama, no GPU. They can be
 tested on a developer machine in <100 ms and catch regressions that would
@@ -21,7 +21,7 @@ What this does NOT test
 
 Run
 ---
-  pytest -v hermes/test_router_templates.py
+  pytest -v kernel/hermes/test_router_templates.py
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from phrasing import normalise, looks_like_question  # noqa: E402
-from hermes.hermes import classify, SPECIALISTS     # noqa: E402
+from kernel.phrasing import normalise, looks_like_question  # noqa: E402
+from kernel.hermes.hermes import classify, SPECIALISTS     # noqa: E402
 
 
 # --- greeting fast-path -----------------------------------------------------

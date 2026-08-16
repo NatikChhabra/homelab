@@ -1,5 +1,5 @@
 #!/bin/bash
-# Staged by update-audit.sh on 2026-08-13T08:31:00Z.
+# Staged by update-audit.sh on 2026-08-15T23:00:04Z.
 # Run from an INTERACTIVE shell — docker pull needs the credential helper,
 # which fails under Task Scheduler on this host.
 # Only PATCH and MINOR updates are listed. MAJOR / RENAMED are excluded
@@ -7,6 +7,9 @@
 set -euo pipefail
 echo 'Backing up config volumes first...'
 bash /c/ServerData/Stacks/backup-volumes.sh
+
+# glances : v4.5.5 -> v4.5.6 (PATCH)
+cd 'C:\ServerData\Stacks\server-room' && docker compose pull 'glances' && docker compose up -d 'glances'
 
 # vaultwardem-vaultwarden-1 : 1.37.0 -> 1.37.1 (PATCH)
 cd 'C:\ServerData\Stacks\vaultwarden' && docker compose pull 'vaultwarden' && docker compose up -d 'vaultwarden'
