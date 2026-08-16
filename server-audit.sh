@@ -1816,7 +1816,26 @@ _emit " SUMMARY  ok=$OK  warnings=$WARN  failures=$FAIL"
 _emit " RESULT: $OK ok, $WARN warning(s), $FAIL failure(s)"
 _emit "============================================================"
 
-printf '%s' "$LINES" > "$REPORT" 2>/dev/null
+# Pre-report guard: scan the report content for leaked secrets before it hits
+# disk. Incident 2026-08-16: a report file was served over HTTP with a
+# plaintext Tuya device ID still in it, caught by scan-secrets.sh after the
+# fact. This check catches it before the write.
+_TMP_REPORT=$(mktemp /c/ServerData/Stacks/.audit-report-tmp.XXXXXX)
+printf '%s' "$LINES" > "$_TMP_REPORT" 2>/dev/null
+_SCAN_OUT=$(bash /c/ServerData/Stacks/scripts/scan-secrets.sh "$_TMP_REPORT" 2>&1) && _SCAN_RC=0 || _SCAN_RC=$?
+if [ "$_SCAN_RC" -eq 0 ]; then
+  mv "$_TMP_REPORT" "$REPORT" 2>/dev/null || cp "$_TMP_REPORT" "$REPORT"
+  rm -f "$_TMP_REPORT"
+else
+  # Leak found — refuse to write the report. Emit the scan output so the
+  # operator knows what leaked and where.
+  rm -f "$_TMP_REPORT"
+  printf '%s\n' "$_SCAN_OUT" | while IFS= read -r _line; do
+    [ -n "$_line" ] && _emit "  CRITICAL $_line"
+  done
+  # Count the leak as a failure so the exit code reflects the problem.
+  FAIL=$((FAIL + 1))
+fi
 [ "$QUIET" = "true" ] && printf 'audit: %s ok, %s warn, %s fail (report: %s)\n' "$OK" "$WARN" "$FAIL" "$REPORT"
 
 # run-job.ps1 treats any non-zero exit as a FAILED job (event-log error + a
