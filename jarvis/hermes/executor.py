@@ -919,7 +919,11 @@ class Executor:
             log.warning("A6 verify after snapshot failed for %s", tool)
             return None
 
-        # Compare and log one structured line.
+        # Collect ALL mismatches instead of returning on the first one.
+        # This way a partial success (some entities failed, some didn't) still
+        # names only the entities that actually failed, not every tracked
+        # entity for the tool.
+        mismatches: list[tuple[str, str, str | None]] = []  # (eid, got, expected_or_none)
         for eid, exp in expected.items():
             if exp is None:
                 continue
@@ -930,17 +934,27 @@ class Executor:
             log.info("A6 verify %s tool=%s entity=%s expected=%s got=%s latency_ms=%s",
                      tag, tool, eid, exp, got, latency_ms)
             if not match:
-                complaint = f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {got}, not {exp}."
-                return complaint
-        # Check for non-actionable states (unavailable/unknown) — these are
-        # MISMATCH even if we had no expected state to compare against.
+                mismatches.append((eid, got, exp))
+        # Non-actionable states are MISMATCH even without an expected value.
         for eid in entity_ids:
             got = after.get(eid, "?")
             if got in NON_ACTIONABLE_STATES:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 log.warning("A6 verify MISMATCH tool=%s entity=%s state=%s latency_ms=%s",
                              tool, eid, got, latency_ms)
-                return f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {got}."
+                mismatches.append((eid, got, None))
+        if mismatches:
+            parts = []
+            for eid, got, exp in mismatches:
+                human = eid.replace(".", "_")
+                if exp is not None:
+                    parts.append(f"{human} is {got}, not {exp}")
+                else:
+                    parts.append(f"{human} is {got}")
+            if len(parts) == 1:
+                return f"That did not take, Sir. {parts[0]}."
+            return (f"That did not take, Sir. {', '.join(parts[:-1])}, "
+                    f"and {parts[-1]}.")
         # For tools without a fixed expected state (good_night), check that
         # at least one entity changed.
         if not expected:
