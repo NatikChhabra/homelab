@@ -298,10 +298,14 @@ ACTUATION_ENTITIES: dict[str, list[str]] = {
     "fan_set": ["fan.fan", "input_number.fan_speed"],
     "ac_on": ["input_boolean.ac_power"],
     "ac_set_temperature": ["input_boolean.ac_power", "input_number.ac_temperature"],
-    "good_night": ["light.node_switch_gang_1", "light.node_switch_gang_2",
-                    "light.node_switch_gang_3", "fan.fan",
-                    "input_boolean.ac_power"],
+    "good_night": ["switch.3_1_node_smart_switch_switch_1",
+                    "switch.3_1_node_smart_switch_switch_2",
+                    "switch.3_1_node_smart_switch_switch_3",
+                    "fan.fan", "input_boolean.ac_power"],
 }
+# States that indicate the device cannot be acted upon. Treated as MISMATCH
+# because the actuation clearly did not succeed.
+NON_ACTIONABLE_STATES = frozenset({"unavailable", "unknown", "none"})
 # Tools whose desired post-action state we can predict from the arguments.
 ACTUATION_EXPECTED: dict[str, dict[str, str | None]] = {
     # entity_id -> expected state after the tool succeeds
@@ -928,6 +932,15 @@ class Executor:
             if not match:
                 complaint = f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {got}, not {exp}."
                 return complaint
+        # Check for non-actionable states (unavailable/unknown) — these are
+        # MISMATCH even if we had no expected state to compare against.
+        for eid in entity_ids:
+            got = after.get(eid, "?")
+            if got in NON_ACTIONABLE_STATES:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                log.warning("A6 verify MISMATCH tool=%s entity=%s state=%s latency_ms=%s",
+                             tool, eid, got, latency_ms)
+                return f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {got}."
         # For tools without a fixed expected state (good_night), check that
         # at least one entity changed.
         if not expected:
