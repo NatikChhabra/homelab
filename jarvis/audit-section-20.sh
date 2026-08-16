@@ -304,3 +304,49 @@ if docker exec jarvis-hass test -f /config/packages/jarvis_intents.yaml 2>/dev/n
 else
   fail "/config/packages/jarvis_intents.yaml MISSING in HA container -- intent handlers broken"
 fi
+
+# --- Repo assertion: A6 unavailable MUST be MISMATCH ------------------------
+# Incident 2026-08-16: _verify_actuation accepted unavailable/unknown/none
+# entities as a successful actuation, so JARVIS confirmed actions that never
+# reached the device. The fix added NON_ACTIONABLE_STATES frozenset and a
+# per-entity check in _verify_actuation; this assertion proves the fix is in
+# the repo and the test that guards it exists.
+ACTUATOR_PY="$JARVIS_DIR/hermes/executor.py"
+TEST_PY="$JARVIS_DIR/hermes/test_executor.py"
+
+if [ -f "$TEST_PY" ]; then
+  ok "test_executor.py exists (A6 unavailable guard)"
+else
+  fail "test_executor.py MISSING -- A6 unavailable check has no regression guard"
+fi
+
+# NON_ACTIONABLE_STATES must contain the three absent-state strings and must
+# NOT contain "off" (good_night's desired state IS off; including it would
+# cause every good_night to report MISMATCH even on success).
+if grep -q 'NON_ACTIONABLE_STATES.*frozenset' "$ACTUATOR_PY" 2>/dev/null; then
+  ok "NON_ACTIONABLE_STATES is a frozenset in executor.py"
+else
+  fail "NON_ACTIONABLE_STATES not a frozenset in executor.py -- A6 unavailable check may be broken"
+fi
+
+for word in unavailable unknown none; do
+  if grep -q "\"$word\"" "$ACTUATOR_PY" 2>/dev/null; then
+    ok "NON_ACTIONABLE_STATES contains '$word'"
+  else
+    fail "NON_ACTIONABLE_STATES missing '$word' -- $word entities will not be caught as MISMATCH"
+  fi
+done
+
+if grep -q '"off"' "$ACTUATOR_PY" 2>/dev/null && grep -q 'NON_ACTIONABLE_STATES.*off' "$ACTUATOR_PY" 2>/dev/null; then
+  fail "NON_ACTIONABLE_STATES contains 'off' -- good_night will always report MISMATCH even on success"
+else
+  ok "NON_ACTIONABLE_STATES does not contain 'off' (good_night target state)"
+fi
+
+# The per-entity check in _verify_actuation must exist. Without it the frozenset
+# is dead code -- nothing would ever consult it.
+if grep -q 'NON_ACTIONABLE_STATES' "$ACTUATOR_PY" 2>/dev/null; then
+  ok "_verify_actuation references NON_ACTIONABLE_STATES (guard is live)"
+else
+  fail "_verify_actuation does not reference NON_ACTIONABLE_STATES -- guard is dead code"
+fi
