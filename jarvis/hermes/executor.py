@@ -870,13 +870,15 @@ class Executor:
 
         Must not add latency to the local path -- the caller speaks the
         acknowledgement first and calls this in the background. Here we just
-        return the string; the router decides whether to append it.
+        return the string; the router decided that appending it to the already-
+        spoken reply is dead code and does not do that. The method logs one
+        structured line per call so the audit can count mismatches.
         """
         entity_ids = ACTUATION_ENTITIES.get(tool)
         if not entity_ids:
             return None
         expected = ACTUATION_EXPECTED.get(tool, {})
-        log.info("A6 verify intent=%s args=%s entities=%s", tool, args, entity_ids)
+        t0 = time.perf_counter()
 
         # Snapshot current states.
         before: dict[str, str] = {}
@@ -890,7 +892,6 @@ class Executor:
                     if resp.status == 200:
                         state = await resp.json()
                         before[eid] = str(state.get("state") or "unknown")
-            log.info("A6 verify before=%s", before)
         except Exception:  # noqa: BLE001 - verification failure is not a tool failure
             log.warning("A6 verify before snapshot failed for %s", tool)
             return None
@@ -910,27 +911,35 @@ class Executor:
                     if resp.status == 200:
                         state = await resp.json()
                         after[eid] = str(state.get("state") or "unknown")
-            log.info("A6 verify after=%s", after)
         except Exception:  # noqa: BLE001
             log.warning("A6 verify after snapshot failed for %s", tool)
             return None
 
-        # Compare.
+        # Compare and log one structured line.
         for eid, exp in expected.items():
             if exp is None:
                 continue
-            if after.get(eid) == exp:
-                continue
-            complaint = f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {after.get(eid, chr(63))}, not {exp}."
-            log.warning("A6 verify FAILED tool=%s entity=%s expected=%s got=%s", tool, eid, exp, after.get(eid, "?"))
-            return complaint
+            got = after.get(eid, "?")
+            match = got == exp
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            tag = "MATCH" if match else "MISMATCH"
+            log.info("A6 verify %s tool=%s entity=%s expected=%s got=%s latency_ms=%s",
+                     tag, tool, eid, exp, got, latency_ms)
+            if not match:
+                complaint = f"That did not take, Sir. {eid.replace(chr(46), chr(95))} is {got}, not {exp}."
+                return complaint
         # For tools without a fixed expected state (good_night), check that
         # at least one entity changed.
-        if not expected and all(after.get(eid) == before.get(eid) for eid in entity_ids
-                                if eid in before and eid in after):
-            log.warning("A6 verify FAILED tool=%s no entity changed", tool)
-            return "That did not take, Sir. The devices did not change state."
-        log.info("A6 verify OK tool=%s", tool)
+        if not expected:
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            any_changed = any(after.get(eid) != before.get(eid)
+                              for eid in entity_ids
+                              if eid in before and eid in after)
+            tag = "MATCH" if any_changed else "MISMATCH"
+            log.info("A6 verify %s tool=%s entities=%s before=%s after=%s latency_ms=%s",
+                     tag, tool, entity_ids, before, after, latency_ms)
+            if not any_changed:
+                return "That did not take, Sir. The devices did not change state."
         return None
 
     async def _run_call(self, session: aiohttp.ClientSession,
