@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir aiohttp==3.10.11 \
 # all six /api/hud/ endpoints returned 404. voice_server.py calls
 # hud.register(app) unconditionally, so leaving it out of the image is not a
 # missing panel, it is an ImportError that stops the server booting at all.
-COPY wyoming_client.py voice_server.py tts_engine.py router.py phrasing.py ha_aliases.py hud.py speaker_model.py ./
+COPY wyoming_client.py voice_server.py tts_engine.py router.py phrasing.py ha_aliases.py hud.py speaker_model.py policy.py enrol.py ./
 COPY verify/ ./verify/
 COPY perf/ ./perf/
 # Hermes: specialist routing + the executor that dispatches what it selects.
