@@ -59,6 +59,7 @@ from typing import Any
 import aiohttp
 
 from phrasing import looks_like_question, normalise
+from policy import PolicyEngine
 
 log = logging.getLogger("jarvis.router")
 
@@ -78,10 +79,12 @@ def _get_speaker_model():
             _SPEAKER_MODEL = None
     return _SPEAKER_MODEL
 
-# Guest-tier deny list: Hermes tool names that satellite mics must never
-# execute. Mirrors the same list in custom_components/aether_bridge/const.py.
-# If a new driver tool is added that a guest should not have, add it here.
-GUEST_DENY_LIST: frozenset[str] = frozenset({
+# Policy engine — single source of truth for guest-tier enforcement.
+_POLICY = PolicyEngine("aether-policy.yaml")
+
+# Backward-compat alias: callers that import GUEST_DENY_LIST directly still
+# work. The real enforcement goes through _POLICY.evaluate() below.
+GUEST_DENY_LIST: frozenset[str] = _POLICY.get_deny_list() or frozenset({
     "pc_type",
     "pc_power",
     "pc_app",
@@ -132,6 +135,55 @@ def _log_interaction(r: "RouteResult", text: str) -> None:
 
 # Response types HA uses for a turn that actually did something.
 _SUCCESS_TYPES = ("action_done", "query_answer")
+
+# Individual light commands that HA's conversation agent cannot resolve.
+# phrasing.py rewrites "turn on light one" -> "turn on gang 1" but HA doesn't
+# recognise "gang 1" as a valid entity name. This table lets the router handle
+# those commands directly, bypassing the conversation agent entirely.
+_LIGHT_GANG: dict[str, str] = {
+    "one": "switch.3_1_node_smart_switch_switch_1",
+    "1": "switch.3_1_node_smart_switch_switch_1",
+    "gang 1": "switch.3_1_node_smart_switch_switch_1",
+    "gang1": "switch.3_1_node_smart_switch_switch_1",
+    "light 1": "switch.3_1_node_smart_switch_switch_1",
+    "light1": "switch.3_1_node_smart_switch_switch_1",
+    "first": "switch.3_1_node_smart_switch_switch_1",
+    "two": "switch.3_1_node_smart_switch_switch_2",
+    "2": "switch.3_1_node_smart_switch_switch_2",
+    "gang 2": "switch.3_1_node_smart_switch_switch_2",
+    "gang2": "switch.3_1_node_smart_switch_switch_2",
+    "light 2": "switch.3_1_node_smart_switch_switch_2",
+    "light2": "switch.3_1_node_smart_switch_switch_2",
+    "second": "switch.3_1_node_smart_switch_switch_2",
+    "three": "switch.3_1_node_smart_switch_switch_3",
+    "3": "switch.3_1_node_smart_switch_switch_3",
+    "gang 3": "switch.3_1_node_smart_switch_switch_3",
+    "gang3": "switch.3_1_node_smart_switch_switch_3",
+    "light 3": "switch.3_1_node_smart_switch_switch_3",
+    "light3": "switch.3_1_node_smart_switch_switch_3",
+    "third": "switch.3_1_node_smart_switch_switch_3",
+}
+# Pattern: "turn on [light] one", "light one on", "gang 1 on", etc.
+_INDIVIDUAL_LIGHT_RE = re.compile(
+    r"^(?:turn\s+)?(on|off)\s+(?:the\s+)?"
+    r"(?:(?:light|gang)\s*)?"
+    r"(one|1|gang\s*1|light\s*1|first|two|2|gang\s*2|light\s*2|second|"
+    r"three|3|gang\s*3|light\s*3|third)"
+    r"(?:\s+(?:light|gang))?$",
+    re.I,
+)
+# "turn on the lights" / "turn off the lights" — HA resolves area "bedroom" to
+# backlight light entities, not the switch entities. Fast-path bypasses HA
+# entirely and calls homeassistant.turn_on/off with the three switch entity ids.
+_ALL_LIGHTS_RE = re.compile(
+    r"^(?:turn\s+)?(on|off)\s+the\s+lights?$",
+    re.I,
+)
+_ALL_LIGHTS_EIDS = [
+    "switch.3_1_node_smart_switch_switch_1",
+    "switch.3_1_node_smart_switch_switch_2",
+    "switch.3_1_node_smart_switch_switch_3",
+]
 
 
 @dataclass
@@ -406,6 +458,45 @@ class IntentRouter:
         # trustworthy signal here.
         return True, ""
 
+    async def _verify_entities(
+        self, session: aiohttp.ClientSession, data: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Reject action_done when success lists target unavailable entities.
+
+        HA's conversation agent can resolve a named entity to a ghost/restored
+        entry that is unavailable. It still returns action_done with the ghost
+        in the success list, which _handled accepts as a win. The result is a
+        spoken confirmation for an action that never reached hardware.
+
+        Strips entity IDs from the success list, reads each state, and rejects
+        when any target is unavailable or restored. Empty success lists (intent
+        scripts) pass through unchanged.
+        """
+        success = (data.get("response", {}) or {}).get("data", {}) or {}
+        targets = success.get("success") or []
+        if not targets:
+            return True, ""
+        for entry in targets:
+            eid = (entry or {}).get("id") or ""
+            if not eid:
+                continue
+            try:
+                async with session.get(
+                    f"{self.hass_url}/api/states/{eid}",
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as r:
+                    if r.status != 200:
+                        continue
+                    body = await r.json()
+                    state = body.get("state", "")
+                    attrs = body.get("attributes", {})
+                    if state in ("unavailable", "unknown") or attrs.get("restored"):
+                        return False, f"entity_unavailable:{eid}"
+            except Exception:  # noqa: BLE001
+                continue
+        return True, ""
+
     # --- public ------------------------------------------------------------
 
     async def process(
@@ -420,7 +511,7 @@ class IntentRouter:
         """Route one utterance under a hard aggregate timeout.
 
         `tier` gates which tools are allowed: "owner" (default) allows all,
-        "guest" blocks the deny list in GUEST_DENY_LIST.
+        "guest" runs each tool through the policy engine.
 
         If `pcm` is provided (16 kHz mono int16), speaker verification runs
         concurrently with the routing decision and the resolved speaker tier
@@ -538,6 +629,69 @@ class IntentRouter:
                     self.stats.record(r)
                     return r
 
+        # --- individual light fast-path: bypass HA conversation agent --------
+        # HA's conversation agent does not recognise "gang 1" / "light one" etc.
+        # even though phrasing.py rewrites to those forms. Handle directly so
+        # the router stays local and fast (<50 ms) for the most-common commands.
+        m = _INDIVIDUAL_LIGHT_RE.match(text.strip())
+        if m and self.enabled:
+            action = m.group(1).lower()  # "on" or "off"
+            gang = m.group(2).lower().replace(" ", "")
+            eid = _LIGHT_GANG.get(gang)
+            if eid:
+                t0 = time.perf_counter()
+                try:
+                    async with session.post(
+                        f"{self.hass_url}/api/services/switch/{'turn_on' if action == 'on' else 'turn_off'}",
+                        json={"entity_id": eid},
+                        headers={"Authorization": f"Bearer {self.token}"},
+                        timeout=aiohttp.ClientTimeout(total=3),
+                    ) as resp:
+                        if resp.status in (200, 201):
+                            local_ms = (time.perf_counter() - t0) * 1000
+                            r = RouteResult(
+                                speech=f"Light {action}." if action == "on" else f"Light {action}., sir.",
+                                path="local",
+                                local_ms=round(local_ms, 1),
+                                total_ms=round(local_ms, 1),
+                            )
+                            self.stats.record(r)
+                            return r
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("individual light service call failed: %s", exc)
+                # Fall through to normal local path on failure.
+
+        # --- all-lights fast-path: bypass HA conversation agent -----------
+        # HA resolves "bedroom" to light (backlight) entities, not switches.
+        # This fast-path calls homeassistant.turn_on/off with explicit switch
+        # entity ids, same behaviour the intent_script in jarvis_intents.yaml
+        # was supposed to provide but the bind mount is stale in-container.
+        m = _ALL_LIGHTS_RE.match(text.strip())
+        if m and self.enabled:
+            action = m.group(1).lower()
+            t0 = time.perf_counter()
+            try:
+                async with session.post(
+                    f"{self.hass_url}/api/services/homeassistant/"
+                    f"turn_{'on' if action == 'on' else 'off'}",
+                    json={"entity_id": _ALL_LIGHTS_EIDS},
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        local_ms = (time.perf_counter() - t0) * 1000
+                        r = RouteResult(
+                            speech=f"Turned {'on' if action == 'on' else 'off'} the lights",
+                            path="local",
+                            local_ms=round(local_ms, 1),
+                            total_ms=round(local_ms, 1),
+                        )
+                        self.stats.record(r)
+                        return r
+            except Exception as exc:  # noqa: BLE001
+                log.debug("all-lights service call failed: %s", exc)
+            # Fall through to normal local path on failure.
+
         # Rewrite into a phrasing the local parser accepts. Free, and it is what
         # turns most of the near-misses into local hits. The ORIGINAL text is
         # what goes to the model on fallback -- the model reasons better about
@@ -557,6 +711,8 @@ class IntentRouter:
             if data is not None:
                 state["local_cid"] = data.get("conversation_id") or state.get("local_cid")
                 ok, why = self._handled(data, local_text)
+                if ok:
+                    ok, why = await self._verify_entities(session, data)
                 if ok:
                     r = RouteResult(
                         speech=self._speech(data) or "At your service, sir.",
@@ -682,15 +838,16 @@ class IntentRouter:
                     # that nothing performed.
                     hermes_reason = "no_tool_call"
                 else:
-                    # Guest-tier enforcement: block deny-listed tools before
-                    # they reach the executor. A guest satellite mic must never
-                    # be able to type on the PC, send WhatsApp messages, or
-                    # place calls — those are owner-only verbs.
+                    # Guest-tier enforcement: run each tool through the policy
+                    # engine. A guest satellite mic must never be able to type
+                    # on the PC, send WhatsApp messages, or place calls —
+                    # those are owner-only verbs.
                     if tier == "guest":
                         denied = [
                             call.get("name") or ""
                             for call in h.tool_calls
-                            if (call.get("name") or "") in GUEST_DENY_LIST
+                            if _POLICY.evaluate("guest", call.get("name") or "", "any")
+                            in ("deny",)
                         ]
                         if denied:
                             r = RouteResult(
