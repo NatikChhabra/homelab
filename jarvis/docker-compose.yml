@@ -287,7 +287,7 @@ services:
     # hey_jarvis is a pretrained openWakeWord model; nothing to train.
     command: >-
       --preload-model hey_jarvis
-      --threshold 0.3
+      --threshold 0.25
       --trigger-level 1
     ports:
       - "10400:10400"

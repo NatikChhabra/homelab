@@ -59,6 +59,7 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "host-speaker"))
@@ -127,6 +128,12 @@ MAX_UTTERANCE_S = float(os.getenv("JARVIS_MAX_UTTERANCE", "20.0"))
 HEARTBEAT_S = 30
 MIN_UTTERANCE_S = 1.5     # below this it is noise, not a command
 
+# Wake word gain: the openWakeWord model was trained on synthetic speech and
+# scores real human speech roughly 5-10x lower than the synthetic control at
+# the same RMS. Amplifying the captured int16 stream before feeding it to the
+# detector closes that gap. Configurable so Natik can tune it for his room.
+WAKE_GAIN = int(os.getenv("JARVIS_WAKE_GAIN", "80"))
+
 # Audio captured BEFORE the wake word fires is kept in a short ring buffer and
 # prepended to the recording. openWakeWord reports a detection slightly after
 # the phrase completes, and people run straight on -- "hey jarvis turn the
@@ -160,24 +167,46 @@ _VIRTUAL_FRAGMENTS = frozenset([
 ])
 
 def pick_input(prefer: str | None = None) -> tuple[int | None, str]:
-    """Choose a capture device by name substring, falling back to the default."""
+    """Choose a capture device by name substring, falling back to the default.
+
+    Preference order:
+      1. WASAPI devices at 48 kHz (higher-quality clock, less PortAudio
+         internal resampling).
+      2. MME devices at 44.1 kHz (the legacy path ears.py used to use).
+      3. First available device with input channels.
+
+    Bluetooth hands-free mics (8 kHz) are skipped unless explicitly requested.
+    """
     candidates = [(i, d) for i, d in enumerate(sd.query_devices())
                   if d["max_input_channels"] > 0]
     wanted = prefer or os.getenv("JARVIS_MIC_PREFER", "Microphone Array,Microphone")
-    for want in [w.strip() for w in wanted.split(",") if w.strip()]:
-        for i, d in candidates:
-            # Bluetooth hands-free mics are 8 kHz and sound terrible; skip them
-            # unless explicitly asked for. The laptop array is better.
-            if "hands-free" in d["name"].lower() and "hands-free" not in want.lower():
-                continue
-            if want.lower() in d["name"].lower():
-                name = d["name"]
-                # Warn if this looks like a virtual/routed device
-                if any(v in name.lower() for v in _VIRTUAL_FRAGMENTS):
-                    log.warning("SELECTED DEVICE APPEARS VIRTUAL: %s -- check for voice changers, loopback drivers, or audio hubs", name)
-                return i, name
-    if candidates:
-        i, d = candidates[0]
+    # Build two buckets: WASAPI-48k first, then everything else.
+    wasapi_48 = []
+    mme_44 = []
+    rest: list[tuple[int, dict]] = []
+    for i, d in candidates:
+        api = sd.query_hostapis(d["hostapi"])["name"]
+        rate = d["default_samplerate"]
+        if "hands-free" in d["name"].lower() and "hands-free" not in wanted.lower():
+            continue
+        if api == "Windows WASAPI" and abs(rate - 48000) < 1:
+            wasapi_48.append((i, d))
+        elif api == "MME" and abs(rate - 44100) < 1:
+            mme_44.append((i, d))
+        else:
+            rest.append((i, d))
+    ordered = wasapi_48 + mme_44 + rest
+
+    _wanted = [w.strip() for w in wanted.split(",") if w.strip()]
+    for i, d in ordered:
+        if any(w.lower() in d["name"].lower() for w in _wanted):
+            name = d["name"]
+            if any(v in name.lower() for v in _VIRTUAL_FRAGMENTS):
+                log.warning("SELECTED DEVICE APPEARS VIRTUAL: %s -- check for voice changers, loopback drivers, or audio hubs", name)
+            return i, name
+    # Fallback: first match in preferred order, regardless of name.
+    if ordered:
+        i, d = ordered[0]
         name = d["name"]
         if any(v in name.lower() for v in _VIRTUAL_FRAGMENTS):
             log.warning("SELECTED DEVICE APPEARS VIRTUAL: %s -- check for voice changers, loopback drivers, or audio hubs", name)
@@ -335,6 +364,35 @@ class Ears:
         self._beep_path = os.path.join(
             str(Path(__file__).resolve().parent / "beeps" / f"{JARVIS_BEEP}.wav")
         )
+        # Capture-rate info: some devices (WASAPI) only support their native
+        # rate. We open at the native rate and resample down to RATE (16 kHz)
+        # manually with polyphase filtering, which produces far cleaner audio
+        # than letting PortAudio resample internally.
+        self._capture_rate: int = RATE
+        self._capture_channels: int = 1
+        self._resamp_up: int = 1
+        self._resamp_down: int = 1
+        self._native_rate: int = 0
+        self._wake_gain: int = WAKE_GAIN
+
+    def _setup_capture(self) -> None:
+        """Detect the device's native rate and configure resampling."""
+        dev = sd.query_devices(self.mic_index)
+        native = int(dev["default_samplerate"])
+        channels = int(dev["max_input_channels"])
+        self._native_rate = native
+        self._capture_rate = native
+        self._capture_channels = max(channels, 2)  # always capture stereo
+        if native == RATE:
+            self._capture_channels = 1  # no resampling needed
+            log.info("device %s native rate matches RATE=%d; capturing mono %d Hz",
+                     self.mic_name, RATE, native)
+            return
+        g = int(np.gcd(native, RATE))
+        self._resamp_up = RATE // g
+        self._resamp_down = native // g
+        log.info("device %s native rate=%d Hz; resampling %d->%d (up=%d down=%d) for RATE=%d",
+                 self.mic_name, native, native, RATE, self._resamp_up, self._resamp_down, RATE)
 
     # --- capture -----------------------------------------------------------
 
@@ -344,7 +402,35 @@ class Ears:
         if self.muted or self.loop is None:
             return
         # Called on PortAudio's thread; hand off to the event loop thread-safely.
-        self.loop.call_soon_threadsafe(self.q.put_nowait, bytes(indata))
+        # RawInputStream passes a CFFI buffer, not a numpy array. Convert first.
+        raw = np.frombuffer(indata, dtype=np.int16)
+        if self._capture_channels > 1:
+            raw = raw.reshape(-1, self._capture_channels)
+        if self._resamp_up == 1 and self._resamp_down == 1:
+            # No resampling: device already runs at RATE. Apply gain and pass
+            # through as mono.
+            ch0 = raw[:, 0] if raw.ndim == 2 else raw
+            amplified = np.clip(
+                np.round(ch0.astype(np.float64) * self._wake_gain),
+                -32768, 32767,
+            ).astype(np.int16)
+            self.loop.call_soon_threadsafe(self.q.put_nowait, amplified.tobytes())
+            return
+        # Resample: native-rate stereo -> 16 kHz mono via polyphase filter.
+        # Take channel 0 (higher SNR on this mic array), resample, amplify,
+        # and push exactly BLOCK samples.
+        ch0 = raw[:, 0].astype(np.float64) if raw.ndim == 2 else raw.astype(np.float64)
+        out = resample_poly(ch0, self._resamp_up, self._resamp_down)
+        # Trim or pad to exactly BLOCK samples so downstream consumers are
+        # happy. In practice the ratio is exact for 48->16 (factor 3).
+        if len(out) > BLOCK:
+            out = out[:BLOCK]
+        elif len(out) < BLOCK:
+            out = np.pad(out, (0, BLOCK - len(out)))
+        # Amplify to close the synthetic-vs-human speech scoring gap.
+        out = out * self._wake_gain
+        chunk = np.clip(np.round(out), -32768, 32767).astype(np.int16)
+        self.loop.call_soon_threadsafe(self.q.put_nowait, chunk.tobytes())
 
     # --- the loop ----------------------------------------------------------
 
@@ -357,10 +443,13 @@ class Ears:
             return
 
         self._reconnect_attempt = 0
+        self._setup_capture()
         detector = WakeDetector(WAKE_HOST, WAKE_PORT, WAKE_WORD)
         await detector.connect()
         clap = ClapDetector()
-        log.info("listening on %s (wake word %r, double-clap)", self.mic_name, WAKE_WORD)
+        log.info("listening on %s (wake word %r, double-clap, capture_rate=%dHz ch=%d resamp=%d/%d wake_gain=%d)",
+                 self.mic_name, WAKE_WORD, self._capture_rate, self._capture_channels,
+                 self._resamp_up, self._resamp_down, self._wake_gain)
 
         # Heartbeat: a periodic log line so the watchdog can detect staleness.
         async def _heartbeat() -> None:
@@ -371,8 +460,10 @@ class Ears:
 
         preroll: deque[bytes] = deque(maxlen=int(PREROLL_S * RATE / BLOCK) + 1)
 
-        with sd.RawInputStream(samplerate=RATE, blocksize=BLOCK, device=self.mic_index,
-                               dtype="int16", channels=1, callback=self._callback):
+        with sd.RawInputStream(samplerate=self._capture_rate, blocksize=BLOCK,
+                               device=self.mic_index, dtype="int16",
+                               channels=self._capture_channels,
+                               callback=self._callback):
             async with aiohttp.ClientSession() as http:
                 while True:
                     chunk = await self.q.get()
