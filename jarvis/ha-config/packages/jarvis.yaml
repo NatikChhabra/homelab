@@ -277,12 +277,12 @@ script:
       raha hoon", "bedtime".
     mode: single
     sequence:
-      - action: light.turn_off
+      - action: switch.turn_off
         target:
           entity_id:
-            - light.node_switch_gang_1
-            - light.node_switch_gang_2
-            - light.node_switch_gang_3
+            - switch.3_1_node_smart_switch_switch_1
+            - switch.3_1_node_smart_switch_switch_2
+            - switch.3_1_node_smart_switch_switch_3
       - action: script.ac_set_temperature
         data:
           temperature: 25
@@ -299,11 +299,11 @@ script:
     mode: single
     sequence:
       - action: script.tv_toggle
-      - action: light.turn_off
+      - action: switch.turn_off
         target:
           entity_id:
-            - light.node_switch_gang_1
-            - light.node_switch_gang_2
+            - switch.3_1_node_smart_switch_switch_1
+            - switch.3_1_node_smart_switch_switch_2
       - action: script.ac_set_temperature
         data:
           temperature: 24
@@ -315,12 +315,12 @@ script:
       "turn everything off", "shut it all down", "I'm leaving", "sab band kar do".
     mode: single
     sequence:
-      - action: light.turn_off
+      - action: switch.turn_off
         target:
           entity_id:
-            - light.node_switch_gang_1
-            - light.node_switch_gang_2
-            - light.node_switch_gang_3
+            - switch.3_1_node_smart_switch_switch_1
+            - switch.3_1_node_smart_switch_switch_2
+            - switch.3_1_node_smart_switch_switch_3
       - action: script.fan_set
         data:
           level: 0
@@ -334,9 +334,12 @@ script:
       temperature. Use for "I'm home", "I'm back", "main aaya", "I'm back home".
     mode: single
     sequence:
-      - action: light.turn_on
+      - action: switch.turn_on
         target:
-          area_id: bedroom
+          entity_id:
+            - switch.3_1_node_smart_switch_switch_1
+            - switch.3_1_node_smart_switch_switch_2
+            - switch.3_1_node_smart_switch_switch_3
       - action: script.ac_set_temperature
         data:
           temperature: 24

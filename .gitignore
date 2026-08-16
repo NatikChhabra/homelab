@@ -68,3 +68,4 @@ secrets.env
 *.log
 *.txt
 *.json
+jarvis/ha-config/custom_components/tuya-local/

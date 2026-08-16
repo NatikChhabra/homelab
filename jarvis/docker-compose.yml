@@ -62,6 +62,7 @@ services:
       # Bind-mount JARVIS config so custom sentences survive container rebuilds.
       # These files live in the repo and must not depend on docker cp.
       - ./ha-config/custom_sentences/en/jarvis.yaml:/config/custom_sentences/en/jarvis.yaml:ro
+      - ./ha-config/packages/jarvis.yaml:/config/packages/jarvis.yaml:ro
       - ./ha-config/packages/jarvis_intents.yaml:/config/packages/jarvis_intents.yaml:ro
       # Bind-mount custom_components so the aether_bridge integration is visible
       # to HA without a manual docker-cp step. The component lives in the repo
