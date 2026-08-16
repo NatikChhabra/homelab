@@ -35,12 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import aiohttp  # noqa: E402
 
-from router import IntentRouter  # noqa: E402
+from kernel.router import IntentRouter  # noqa: E402
 
 HASS = os.getenv("HASS_URL", "http://jarvis-hass:8123")
 TOKEN = os.getenv("JARVIS_HASS_TOKEN") or os.getenv("HA_API_TOKEN", "")
-LIGHTS = ["light.node_switch_gang_1", "light.node_switch_gang_2",
-          "light.node_switch_gang_3"]
+LIGHTS = ["switch.3_1_node_smart_switch_switch_1",
+          "switch.3_1_node_smart_switch_switch_2",
+          "switch.3_1_node_smart_switch_switch_3"]
 
 
 async def states(s: aiohttp.ClientSession) -> dict[str, str]:
@@ -57,7 +58,7 @@ async def restore(s: aiohttp.ClientSession, snap: dict[str, str]) -> None:
     for e, st in snap.items():
         if st not in ("on", "off"):
             continue
-        await s.post(f"{HASS}/api/services/light/turn_{st}",
+        await s.post(f"{HASS}/api/services/switch/turn_{st}",
                      headers=h, json={"entity_id": e})
 
 
@@ -98,7 +99,7 @@ async def main() -> int:
         # --- 2. execution through the router, on a light. This is the assertion
         # that Hermes actually CHANGED something via the live path.
         print()
-        await s.post(f"{HASS}/api/services/light/turn_on",
+        await s.post(f"{HASS}/api/services/switch/turn_on",
                      headers={"Authorization": f"Bearer {TOKEN}"},
                      json={"entity_id": LIGHTS[0]})
         await asyncio.sleep(1.5)

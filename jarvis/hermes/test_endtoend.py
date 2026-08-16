@@ -35,18 +35,19 @@ from hermes.executor import Executor      # noqa: E402
 HASS = os.getenv("HASS_URL", "http://jarvis-hass:8123").rstrip("/")
 TOKEN = os.getenv("JARVIS_HASS_TOKEN", "")
 
-LIGHTS = ["light.node_switch_gang_1", "light.node_switch_gang_2",
-          "light.node_switch_gang_3"]
+LIGHTS = ["switch.3_1_node_smart_switch_switch_1",
+          "switch.3_1_node_smart_switch_switch_2",
+          "switch.3_1_node_smart_switch_switch_3"]
 
 # (utterance, entity to watch, expected state). Chosen to exercise the paths
 # that actually differ: a named target, an intent-with-argument, and the
 # ambiguous plural that the local parser cannot handle at all -- which is the
 # whole reason the model leg exists.
 CASES = [
-    ("turn off light one",  "light.node_switch_gang_1", "off"),
-    ("turn on light one",   "light.node_switch_gang_1", "on"),
-    ("turn off light two",  "light.node_switch_gang_2", "off"),
-    ("turn on light two",   "light.node_switch_gang_2", "on"),
+    ("turn off light one",  "switch.3_1_node_smart_switch_switch_1", "off"),
+    ("turn on light one",   "switch.3_1_node_smart_switch_switch_1", "on"),
+    ("turn off light two",  "switch.3_1_node_smart_switch_switch_2", "off"),
+    ("turn on light two",   "switch.3_1_node_smart_switch_switch_2", "on"),
 ]
 
 
@@ -61,7 +62,7 @@ async def get_state(s: aiohttp.ClientSession, eid: str) -> str:
 async def set_state(s: aiohttp.ClientSession, eid: str, state: str) -> None:
     """Restore an entity using the real service, not the states API."""
     svc = "turn_on" if state == "on" else "turn_off"
-    await s.post(f"{HASS}/api/services/light/{svc}",
+    await s.post(f"{HASS}/api/services/switch/{svc}",
                  json={"entity_id": eid},
                  headers={"Authorization": f"Bearer {TOKEN}"})
 

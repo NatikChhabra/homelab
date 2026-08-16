@@ -87,7 +87,7 @@ be worse than no watchdog. Liveness is decided instead from the ARP table, Home
 Assistant's own entity availability, and HA's ESTABLISHED sockets to port 6668.
 
 **How a moved device is found again.** By MAC. Note that the Device ID embeds the
-MAC for the blaster (`853521608cce4edb3d49` -> `8c:ce:4e:db:3d:49`) but **not** for
+MAC for the blaster (`[blaster_device_id]` -> `8c:ce:4e:db:3d:49`) but **not** for
 the switch, whose ID ends in non-hex characters and whose derived MAC appears
 nowhere on the network. So the switch's MAC is learned from ARP whenever it is
 confirmed at its configured address and cached in `tuya-watchdog-state.json`. If
