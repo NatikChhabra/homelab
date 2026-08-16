@@ -1381,6 +1381,35 @@ else
 fi
 rm -f "$_docker_logs_tmp"
 
+# --- A6 closed-loop verification: structured log + no dead code -------------
+# Incident 2026-08-16: router.py had a _verify_all() closure that rebound
+# `speech` via nonlocal AFTER RouteResult had already been constructed. The
+# spoken reply went out with the old string; complaints only appeared in the
+# background task and were never heard. Delete that pattern, replace with one
+# structured log line per verify call, and assert both in the audit.
+_A6_REPO_DISPATCH=$(grep -c "A6 dispatching verify" "$JARVIS_DIR/router.py" 2>/dev/null || true)
+_A6_REPO_DEAD=$(grep -c "nonlocal speech" "$JARVIS_DIR/router.py" 2>/dev/null || true)
+_A6_REPO_LOG_LINE=$(grep -c 'A6 verify %s tool=' "$JARVIS_DIR/hermes/executor.py" 2>/dev/null || true)
+if [ "$_A6_REPO_DEAD" -eq 0 ] && [ "$_A6_REPO_DISPATCH" -ge 1 ] && [ "$_A6_REPO_LOG_LINE" -ge 1 ]; then
+  ok "A6 verify: no dead nonlocal-speech code; dispatch + structured log line present"
+else
+  fail "A6 verify broken in repo: dead_code=$_A6_REPO_DEAD dispatch=$_A6_REPO_DISPATCH log_line=$_A6_REPO_LOG_LINE"
+fi
+
+# Mismatch rate from docker logs (last 72 h). One line per verified actuation;
+# MISMATCH = actuation did not produce the expected entity state.
+_A6_MATCH=$(docker logs jarvis-voice --since "72h" 2>/dev/null | grep -c "A6 verify MATCH" || true)
+_A6_MISMATCH=$(docker logs jarvis-voice --since "72h" 2>/dev/null | grep -c "A6 verify MISMATCH" || true)
+_A6_TOTAL=$(( _A6_MATCH + _A6_MISMATCH ))
+if [ "$_A6_TOTAL" -eq 0 ]; then
+  warn "A6 verify: no actuation events in last 72 h of logs - mismatch rate is UNKNOWN"
+elif [ "$_A6_MISMATCH" -eq 0 ]; then
+  ok "A6 verify: $_A6_TOTAL actuations checked, 0 mismatches (100% success)"
+else
+  _PCT=$(( _A6_MISMATCH * 100 / _A6_TOTAL ))
+  warn "A6 verify: $_A6_MISMATCH/_A6_TOTAL mismatches ($_PCT%) in last 72 h — actuation chain is failing somewhere"
+fi
+
 
 # ---------------------------------------------------------------------------
 sec "21. Host stays awake"

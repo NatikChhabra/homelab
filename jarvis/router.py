@@ -785,27 +785,21 @@ class IntentRouter:
                         speech = (grounded or h.speech or "At your service, sir.").strip()
 
                         # A6: closed-loop verification. Run in background so
-                        # it never adds latency to the response. If a device
-                        # did not change state after an actuation tool, append
-                        # a polite complaint so the user knows something went
-                        # wrong instead of hearing a confident confirmation
-                        # for an action that never happened.
+                        # it never adds latency to the response. The
+                        # verification logs ONE structured line per call
+                        # (A6 verify MATCH|MISMATCH tool=X entity=Y
+                        # expected=z got=z latency_ms=N). If actuation failed,
+                        # the log records it; the spoken reply is not
+                        # retrofitted because it has already gone to TTS.
                         if self._verify_actuation is not None:
                             log.info("A6 dispatching verify for %d tool call(s)", len(h.tool_calls))
                             async def _verify_all() -> None:
-                                complaints = []
                                 for call in h.tool_calls:
                                     tool = call.get("name") or ""
                                     args = call.get("arguments") or {}
                                     log.info("A6 invoking tool=%s", tool)
-                                    c = await self._verify_actuation(
+                                    await self._verify_actuation(
                                         session, tool, args)
-                                    if c:
-                                        complaints.append(c)
-                                if complaints:
-                                    nonlocal speech
-                                    speech = (speech + " Also: "
-                                              + "; ".join(complaints))
                             asyncio.create_task(_verify_all())
 
                         r = RouteResult(
