@@ -247,3 +247,45 @@ class TestVerifyActuationUnavailable:
             )
         assert result is not None
         assert "did not change" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_partial_success_names_only_failed_entities(
+        self, executor: Executor
+    ) -> None:
+        """
+        good_night with 5 entities: switch_1 unavailable, rest off.
+        Speech must name only switch_1, not the 4 successful entities.
+        """
+        session = self._make_session({e: "off" for e in GOOD_NIGHT_ENTITIES})
+        session.set_after("switch.3_1_node_smart_switch_switch_1", "unavailable")
+        # Others stay off (successful)
+        with patch.object(asyncio, "sleep", new_callable=AsyncMock):
+            result = await executor._verify_actuation(
+                session, "good_night", {}
+            )
+        assert result is not None
+        assert "switch_3_1_node_smart_switch_switch_1" in result
+        assert "switch_3_1_node_smart_switch_switch_2" not in result
+        assert "switch_3_1_node_smart_switch_switch_3" not in result
+        assert "fan_fan" not in result
+        assert "ac_power" not in result
+        assert "unavailable" in result
+
+    @pytest.mark.asyncio
+    async def test_multiple_mismatches_in_single_speech(
+        self, executor: Executor
+    ) -> None:
+        """
+        Two entities unavailable → speech names both, joined with 'and'.
+        """
+        session = self._make_session({e: "off" for e in GOOD_NIGHT_ENTITIES})
+        session.set_after("switch.3_1_node_smart_switch_switch_1", "unavailable")
+        session.set_after("switch.3_1_node_smart_switch_switch_2", "unknown")
+        with patch.object(asyncio, "sleep", new_callable=AsyncMock):
+            result = await executor._verify_actuation(
+                session, "good_night", {}
+            )
+        assert result is not None
+        assert "switch_3_1_node_smart_switch_switch_1" in result
+        assert "switch_3_1_node_smart_switch_switch_2" in result
+        assert "and" in result
