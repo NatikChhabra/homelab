@@ -3,6 +3,27 @@
 Continuous run from previous session. Worked through Q7–Q15 and F-feature track.
 All changes committed. No tokens printed.
 
+## End-of-session update (02:40 IST)
+
+F4 container rebuild completed. Dockerfile.ui now copies `aether-policy.yaml` into the image.
+Container rebuilt and restarted. Policy engine verified live in container:
+- `owner + ha_turn_on + light.*` → `allow`
+- `guest + ha_turn_on + light.*` → `allow`
+- `guest + pc_type + any` → `deny`
+- `family + wa_send + any` → `deny`
+
+Audit after rebuild: **142 ok, 12 warnings, 2 failures**.
+- F2/F3/F4 failures resolved (policy.py, enrol.py now in image).
+- 2 remaining failures are pre-existing: `ha_aliases.py`, `hud.py`, `hermes/executor.py` have
+  uncommitted working-tree modifications vs the image. Not touched this session.
+
+New commits this session:
+| Repo | Commit | Message |
+|------|--------|---------|
+| aether | `b00bce9` | chore(aether): reset devices registry, update PROJECT.md, add F1 spec doc |
+| Stacks | `77eed06` | chore: update aether submodule to include F1 spec + registry reset |
+| Stacks | `36f2294` | fix(Dockerfile): COPY aether-policy.yaml into voice image |
+
 ---
 
 ## Completed
@@ -56,10 +77,10 @@ All changes committed. No tokens printed.
 ### F4 — Two-router split elimination (Q14)
 - **Committed**: `jarvis/router.py`, `jarvis/policy.py`, `jarvis/enrol.py`, `jarvis/aether-policy.yaml`, `jarvis/Dockerfile.ui`
 - `jarvis/router.py` now imports `PolicyEngine` from local `policy.py` (not `kernel.policy`).
-- Dockerfile.ui updated to COPY `policy.py` and `enrol.py` into the voice container.
+- Dockerfile.ui updated to COPY `policy.py`, `enrol.py`, and `aether-policy.yaml` into the voice container.
 - Router enforcement uses `_POLICY.evaluate()` instead of hardcoded deny list.
 - `scan-secrets.sh` clean.
-- **STAGED** — requires `docker compose build voice && docker compose up -d voice` to take effect in container.
+- **LIVE** — container rebuilt (`36f2294`) and restarted. Policy engine verified in running container.
 
 ---
 
@@ -96,10 +117,12 @@ Latest run (2026-08-17 01:35): **143 ok, 12 warnings, 1 failure**
 
 ## Open Items
 
-1. **F4 container rebuild**: `docker compose build voice && docker compose up -d voice` needed to bake policy engine into running container.
-2. **F5–F8**: deferred to future session.
-3. **Q10/Q11**: blocked, noted above.
+1. **F5–F8**: deferred to future session.
+2. **Q10/Q11**: blocked, noted above.
+3. **Pre-existing jarvis diffs**: `ha_aliases.py`, `hud.py`, `hermes/executor.py` have uncommitted
+   working-tree changes vs the image. Not part of this session's scope.
 4. **Numba/NumPy conflict**: jarvis speaker tests fail on host Python (numba needs NumPy ≤2.3, got 2.4). Does not affect container (uses pinned image). Out of scope.
+5. **G0 gate**: `JARVIS_BRIDGE_TOKEN` absent from both `secrets.env` files (per STATE-REPORT.md). Pre-existing.
 
 ---
 
