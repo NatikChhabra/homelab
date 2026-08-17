@@ -1,46 +1,34 @@
 """
-actuation_test.py — live actuation battery for the JARVIS router.
+actuation_test.py — state-verified actuation battery for the JARVIS router.
 
-Why this file exists
---------------------
-`test_endtoend.py` proves Hermes dispatches real tool calls.
-`test_router_wiring.py` proves the router wires Hermes into the live path.
-Neither measures the FULL loop: utterance → route → dispatch → verify → speech.
-That gap is where phantom-action bugs hide — the model says "done" while the
-device never moves. This battery closes it.
+Why this rewrite
+----------------
+The old version checked `res.path in PASS_PATHS` — that proved routing and
+nothing else. A service call could return 200 while the device silently
+discarded the frame (the IR blaster problem), or the entity stayed on
+because the wrong ID was targeted. CLAUDE.md rule 4: "A test that doesn't
+test the thing is worse than no test."
 
-Two lanes, one acceptance bar
------------------------------
-1. TEXT (20 cases) — raw string fed to `router.process(session, text, {})`.
-   Catches routing regressions without needing a mic.
-2. VOICE (10 cases) — informative only. Reads WAV files from jarvis/diag/out/
-   and runs each through `router.process(session, hint, {})`. No pcm parameter
-   (the voice pipeline does STT → text before calling process).
+This version closes the loop:
+  1. Read entity state BEFORE the command.
+  2. Dispatch via the router (text or direct HA API for raw prove-it).
+  3. Read entity state AFTER the command.
+  4. Verify the state actually flipped.
 
-Acceptance: 19 of 20 text cases must pass. Voice is informative only — a
-failure there is usually a mic gain issue, not a routing bug.
-
-A case passes when `result.path` is one of: local, hermes, llm, greeting.
-Anything else (error, refused, timeout) is a failure.
-
-Usage
------
-  HASS_URL=http://localhost:8123 JARVIS_HASS_TOKEN=<token> \\
-    python diag/actuation_test.py
-
-Audio files are read from jarvis/diag/out/ — no download needed.
+Acceptance: 19 of 20 state-verified cycles pass. A "pass" means the router
+returned local/hermes/llm/greeting AND the entity state flipped as expected.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-# aether/kernel imports phrasing from the jarvis dir; add both roots.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "aether"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "jarvis"))
 
@@ -48,86 +36,163 @@ from kernel.router import IntentRouter  # noqa: E402
 
 HASS = os.getenv("HASS_URL", "http://localhost:8123").rstrip("/")
 TOKEN = os.getenv("JARVIS_HASS_TOKEN") or os.getenv("HA_API_TOKEN", "")
+if not TOKEN:
+    # Read from secrets.env if not in env — secrets.env is gitignored and
+    # ACL-restricted; only the running user can read it.
+    _secrets = Path(__file__).resolve().parent.parent.parent / "secrets.env"
+    if _secrets.is_file():
+        for _line in _secrets.read_text().splitlines():
+            _line = _line.strip()
+            if _line.startswith("JARVIS_HASS_TOKEN="):
+                TOKEN = _line.split("=", 1)[1]
+                break
+
+# Live light entities — the only ones that physically move.
+# Per CLAUDE.md rule 9: switch. domain, NOT light. domain.
+LIGHT_EID_1 = "switch.3_1_node_smart_switch_switch_1"
+LIGHT_EID_2 = "switch.3_1_node_smart_switch_switch_2"
+LIGHT_EID_3 = "switch.3_1_node_smart_switch_switch_3"
+# Map each utterance keyword to the entity we verify.
+# Match on any word in the utterance, not just the first.
+def _choose_eid(utt: str) -> str:
+    low = utt.lower()
+    for kw, eid in [
+        ("light one", LIGHT_EID_1), ("light 1", LIGHT_EID_1), ("gang 1", LIGHT_EID_1),
+        ("light two", LIGHT_EID_2), ("light 2", LIGHT_EID_2), ("gang 2", LIGHT_EID_2),
+        ("light three", LIGHT_EID_3), ("light 3", LIGHT_EID_3), ("gang 3", LIGHT_EID_3),
+        ("lights", LIGHT_EID_1),   # all-lights fast-path — verify switch_1
+        ("light", LIGHT_EID_1),    # fallback: "turn on light" without number
+    ]:
+        if kw in low:
+            return eid
+    return LIGHT_EID_1
 
 PASS_PATHS = {"local", "hermes", "llm", "greeting"}
-AUDIO_DIR = Path(__file__).resolve().parent / "out"
 
-# --- text cases: utterance -> expected_path (None = any pass path) ----------
-TEXT_CASES: list[tuple[str, str | None]] = [
+# --- text cases: (utterance, expected_path_or_None, expected_light_state_or_None)
+# expected_light_state: "on" or "off" — after the command, switch_1 must be in
+# this state.  None means "no light entity to check".
+TEXT_CASES: list[tuple[str, str | None, str | None]] = [
     # Greetings
-    ("hello jarvis", "greeting"),
-    ("ping", "greeting"),
-    # Local-path lights
-    ("turn on the lights", "local"),
-    ("turn off the lights", "local"),
-    ("lights on", "local"),
-    ("lights off", "local"),
-    ("turn on light one", "local"),
-    ("turn off light two", "local"),
+    ("hello jarvis", "greeting", None),
+    ("ping", "greeting", None),
+    # Local-path lights — all target switch_1 for verification
+    ("turn on the lights", "local", "on"),
+    ("turn off the lights", "local", "off"),
+    ("lights on", "local", "on"),
+    ("lights off", "local", "off"),
+    ("turn on light one", "local", "on"),
+    ("turn off light two", "local", "off"),
     # Local-path climate
-    ("set the ac to 22", "local"),
-    ("ac on", "local"),
-    ("ac off", "local"),
+    ("set the ac to 22", "local", None),
+    ("ac on", "local", None),
+    ("ac off", "local", None),
     # Local-path fan
-    ("set the fan to speed 3", "local"),
-    ("boost the fan", "local"),
+    ("set the fan to speed 3", "local", None),
+    ("boost the fan", "local", None),
     # Local-path scenes
-    ("good night", "local"),
-    ("movie time", "local"),
-    ("I'm home", "local"),
-    # Open-ended — any pass path is fine; exact path depends on HA config
-    ("what time is it", None),
-    ("turn on the tv", None),
-    ("set the ac to 24", "local"),
-    ("fan speed 3", "local"),
+    ("good night", "local", None),
+    ("movie time", "local", None),
+    ("I'm home", "local", None),
+    # Open-ended — any pass path is fine
+    ("what time is it", None, None),
+    ("turn on the tv", None, None),
+    ("set the ac to 24", "local", None),
+    ("fan speed 3", "local", None),
 ]
 
-# --- voice cases: (audio_filename, utterance_hint) --------------------------
-VOICE_CASES: list[tuple[str, str]] = [
-    ("ch0_gain5_test.wav",    "hello jarvis"),
-    ("ch0_gain8_16k.wav",     "ping"),
-    ("ch0_gain10_16k.wav",    "turn on the lights"),
-    ("ch0_gain15_16k.wav",    "set the ac to 22"),
-    ("ch0_gain20_16k.wav",    "good night"),
-    ("ch0_only_16k.wav",      "boost the fan"),
-    ("ch1_only_16k.wav",      "movie time"),
-    ("mean_both_16k.wav",     "I'm home"),
-    ("wasapi_ch1_16k.wav",    "lights off"),
-    ("kokoro_hey_jarvis_16k.wav", "turn off light two"),
-]
+
+async def get_state(s: aiohttp.ClientSession, entity_id: str) -> str:
+    """Read one entity's current state from HA. Returns '' on failure."""
+    try:
+        async with s.get(
+            f"{HASS}/api/states/{entity_id}",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            timeout=aiohttp.ClientTimeout(total=3),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return str(data.get("state") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 async def run_text_case(
-    s: aiohttp.ClientSession, r: IntentRouter, utt: str, want_path: str | None
+    s: aiohttp.ClientSession, r: IntentRouter,
+    utt: str, want_path: str | None, want_state: str | None,
 ) -> tuple[bool, str]:
+    """Run one text case. For light commands, verify desired state after dispatch."""
+    eid = _choose_eid(utt) if want_state else ""
+    before = await get_state(s, eid) if eid else ""
+
     try:
         res = await asyncio.wait_for(r.process(s, utt, {}), timeout=10)
     except asyncio.TimeoutError:
         return False, f"FAIL  {utt!r:45} path=timeout  speech=took too long"
+
     ok = res.path in PASS_PATHS
     if want_path is not None and res.path != want_path:
         ok = False
+
+    state_verif = ""
+    if eid:
+        # Tuya switches need up to 4 s for state to propagate; retry once.
+        after = await get_state(s, eid)
+        if after != want_state:
+            await asyncio.sleep(2)
+            after = await get_state(s, eid)
+        if after == want_state:
+            state_verif = f"STATE_OK {before!r:>3} -> {after!r:>3}"
+        elif after == before:
+            state_verif = f"STATE_STUCK {before!r:>3} (not {want_state})"
+            ok = False
+        else:
+            state_verif = f"STATE_WRONG {before!r:>3} -> {after!r:>3} (want {want_state})"
+            ok = False
+
     mark = "PASS" if ok else "FAIL"
-    return ok, f"{mark}  {utt!r:45} path={res.path:7} speech={res.speech[:50]!r}"
+    extra = f"  {state_verif}" if state_verif else ""
+    return ok, f"{mark}  {utt!r:45} path={res.path:7} speech={res.speech[:50]!r}{extra}"
 
 
-async def run_voice_case(
-    s: aiohttp.ClientSession, r: IntentRouter,
-    audio_file: str, hint: str,
-) -> tuple[bool, str]:
-    path = AUDIO_DIR / audio_file
-    if not path.exists():
-        return False, f"FAIL  {audio_file:30s}  MISSING audio file"
-    # Voice lane runs the hint text through the router. The WAV file existence
-    # proves the audio pipeline produced valid 16 kHz mono 16-bit files; the
-    # routing result is the same as a text-only run with the same hint.
-    try:
-        res = await asyncio.wait_for(r.process(s, hint, {}), timeout=10)
-    except asyncio.TimeoutError:
-        return False, f"FAIL  {audio_file:30s}  TIMEOUT"
-    ok = res.path in PASS_PATHS
-    mark = "PASS" if ok else "FAIL"
-    return ok, f"{mark}  {audio_file:30s}  path={res.path:7} speech={res.speech[:50]!r}"
+async def run_light_cycling(s: aiohttp.ClientSession, r: IntentRouter, cycles: int = 10) -> tuple[int, int, list[str]]:
+    """
+    20 alternating on/off cycles via direct HA API.
+    Returns (passed, total, lines).
+    Tuya switches occasionally need >2 s for state propagation; retry once.
+    """
+    lines = []
+    passed = 0
+    for i in range(1, cycles * 2 + 1):
+        want_on = (i % 2 == 1)
+        action = "on" if want_on else "off"
+        before = await get_state(s, LIGHT_EID_1)
+        if not before:
+            lines.append(f"SKIP cycle {i}: cannot read initial state")
+            continue
+        try:
+            async with s.post(
+                f"{HASS}/api/services/switch/turn_{action}",
+                json={"entity_id": LIGHT_EID_1},
+                headers={"Authorization": f"Bearer {TOKEN}"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                ok_status = resp.status in (200, 201)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"FAIL cycle {i}: service call error: {exc}")
+            continue
+        expected = "on" if want_on else "off"
+        after = await get_state(s, LIGHT_EID_1)
+        if after != expected:
+            await asyncio.sleep(2)
+            after = await get_state(s, LIGHT_EID_1)
+        if ok_status and after == expected:
+            passed += 1
+            lines.append(f"PASS cycle {i}: {before} -> {after} ({action})")
+        else:
+            lines.append(f"FAIL cycle {i}: {before} -> {after} (expected {expected}, status={resp.status if 'resp' in dir() else 'N/A'})")
+    return passed, cycles * 2, lines
 
 
 async def main() -> int:
@@ -138,48 +203,43 @@ async def main() -> int:
     r = IntentRouter(HASS, TOKEN)
     text_ok = 0
     text_fail = 0
-    voice_ok = 0
-    voice_fail = 0
 
-    print(f"HASS={HASS}  hermes_enabled={r.hermes_enabled}\n")
+    print(f"HASS={HASS}  hermes_enabled={r.hermes_enabled}  LIGHT_EID={LIGHT_EID_1}\n")
 
     async with aiohttp.ClientSession() as s:
         # --- TEXT lane --------------------------------------------------------
         print("=" * 72)
-        print("TEXT LANE (20 cases)")
+        print("TEXT LANE (20 cases — state-verified for lights)")
         print("=" * 72)
-        for utt, want in TEXT_CASES:
-            ok, line = await run_text_case(s, r, utt, want)
+        for utt, want, want_state in TEXT_CASES:
+            ok, line = await run_text_case(s, r, utt, want, want_state)
             print(line)
             if ok:
                 text_ok += 1
             else:
                 text_fail += 1
 
-        # --- VOICE lane -------------------------------------------------------
+        # --- LIGHT CYCLE lane -------------------------------------------------
         print()
         print("=" * 72)
-        print("VOICE LANE (10 cases — informative)")
+        print("LIGHT CYCLE LANE (20 alternating on/off, state-verified)")
         print("=" * 72)
-        for audio_file, hint in VOICE_CASES:
-            ok, line = await run_voice_case(s, r, audio_file, hint)
+        cycle_ok, cycle_total, cycle_lines = await run_light_cycling(s, r)
+        for line in cycle_lines:
             print(line)
-            if ok:
-                voice_ok += 1
-            else:
-                voice_fail += 1
 
-    total_ok = text_ok + voice_ok
-    total = len(TEXT_CASES) + len(VOICE_CASES)
     print()
     print("=" * 72)
-    print(f"TEXT: {text_ok}/{len(TEXT_CASES)}  VOICE: {voice_ok}/{len(VOICE_CASES)}")
-    print(f"TOTAL: {total_ok}/{total}")
-    if text_ok >= 19:
-        print("ACCEPTANCE PASS (19/20 text)")
+    print(f"TEXT:     {text_ok}/{len(TEXT_CASES)}")
+    print(f"CYCLES:   {cycle_ok}/{cycle_total}")
+    print(f"TOTAL:    {text_ok + cycle_ok}/{len(TEXT_CASES) + cycle_total}")
+    # Acceptance: 19/20 text + state-verified cycles
+    if text_ok >= 19 and cycle_ok >= 19:
+        print("ACCEPTANCE PASS (19/20 text + 19/20 cycles)")
+        return 0
     else:
-        print(f"ACCEPTANCE FAIL ({text_ok}/20 text, need 19)")
-    return 0 if text_ok >= 19 else 1
+        print(f"ACCEPTANCE FAIL (need 19/20 text AND 19/20 cycles)")
+        return 1
 
 
 if __name__ == "__main__":
