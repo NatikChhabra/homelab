@@ -78,7 +78,7 @@ KOKORO_VOICE = os.getenv("KOKORO_VOICE", "bm_george(3)+bm_lewis(3)+bm_fable(1)")
 KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "0.92"))
 KOKORO_RATE = 24000
 
-PORT = int(os.getenv("JARVIS_SPEAKER_PORT", "8100"))
+PORT = int(os.getenv("JARVIS_SPEAKER_PORT", "8101"))
 
 
 def load_token() -> str:
@@ -134,8 +134,10 @@ def pick_device(prefer: list[str] | None = None) -> tuple[int | None, str, int]:
     return None, "NO OUTPUT DEVICE", 48000
 
 
-def resample(pcm: np.ndarray, src: int, dst: int) -> np.ndarray:
+def resample(pcm: np.ndarray | bytes, src: int, dst: int) -> np.ndarray:
     """Linear resample int16 mono. See the module docstring on why not scipy."""
+    if isinstance(pcm, bytes):
+        pcm = np.frombuffer(pcm, dtype="<i2")
     if src == dst or pcm.size == 0:
         return pcm
     n_out = int(round(pcm.size * dst / src))
@@ -188,15 +190,23 @@ class Speaker:
     def say(self, text: str, voice: str | None = None) -> None:
         self.q.put((text, voice))
 
-    def play_pcm(self, pcm: np.ndarray, src_rate: int = KOKORO_RATE) -> str:
+    def play_pcm(self, pcm: np.ndarray, src_rate: int = KOKORO_RATE,
+                 blocking: bool = True) -> str:
+        """Play int16 mono PCM on the selected device.
+
+        `blocking` defaults to True because sd.play() returns immediately
+        otherwise, and for SPEECH that means the next queued line cuts this one
+        off mid-sentence. Short acknowledgment sounds want the opposite: the
+        beep only has to START before the recording window opens, so ears.py
+        passes blocking=False and gets ~20 ms dispatch instead of waiting out
+        the beep's own ~865 ms length.
+        """
         idx, name, rate = pick_device()
         if idx is None:
             raise RuntimeError("no output device")
         audio = resample(pcm, src_rate, rate)
         with self.lock:
-            # blocking=True: sd.play() returns immediately otherwise and the
-            # next queued line would cut this one off mid-sentence.
-            sd.play(audio, samplerate=rate, device=idx, blocking=True)
+            sd.play(audio, samplerate=rate, device=idx, blocking=blocking)
         return name
 
     def _worker(self) -> None:

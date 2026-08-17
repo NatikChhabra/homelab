@@ -61,6 +61,8 @@ import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
 
+from timing import TurnTimer
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "host-speaker"))
 
@@ -492,14 +494,17 @@ class Ears:
                         continue
 
                     self.heard += 1
+                    timer = TurnTimer(self.heard)
+                    timer.mark("wake_detected")
                     log.info("activation (#%d)", self.heard)
                     clap.reset()
                     # Play acknowledgment sound so the user knows JARVIS heard them
                     try:
+                        timer.mark("beep_started")
                         await self._play_beep(http)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("beep failed: %s", exc)
-                    await self.handle_utterance(http, b"".join(preroll))
+                    await self.handle_utterance(http, b"".join(preroll), timer)
                     preroll.clear()
                     # Drain anything captured while we were busy, so a stale
                     # backlog cannot immediately re-trigger.
@@ -528,12 +533,25 @@ class Ears:
                 break
         return b"".join(parts)
 
-    async def handle_utterance(self, http, preroll: bytes) -> None:  # noqa: ANN001
+    async def handle_utterance(self, http, preroll: bytes, timer: TurnTimer | None = None) -> None:  # noqa: ANN001
         t0 = time.perf_counter()
-        audio = preroll + await self.record_until_silence()
+        if timer:
+            timer.mark("recording_started")
+        rec_pcm = await self.record_until_silence()
+        if timer:
+            timer.mark("recording_ended")
+        # Play end-of-listening tone (ready sound) so user knows recording stopped
+        try:
+            await self._play_beep(http, sound_name="ready")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("end beep failed: %s", exc)
+
+        audio = preroll + rec_pcm
         dur = len(audio) / 2 / RATE
         if dur < MIN_UTTERANCE_S:
             log.info("too short (%.2fs); ignoring", dur)
+            if timer:
+                timer.flush()
             return
         # Reject audio that is too quiet even if long enough -- a silent room
         # segment that survived the duration gate (e.g. a long exhalation after
@@ -541,29 +559,47 @@ class Ears:
         audio_rms = rms(np.frombuffer(audio, dtype="<i2"))
         if audio_rms < SILENCE_RMS * 0.5:
             log.info("too quiet (rms %.0f); ignoring", audio_rms)
+            if timer:
+                timer.flush()
             return
 
         t_rec = time.perf_counter()
+        if timer:
+            timer.mark("stt_started")
 
         try:
             text = await wy.transcribe(WHISPER_HOST, WHISPER_PORT, audio, language="")
         except Exception as exc:  # noqa: BLE001
             log.error("transcribe failed: %s", exc)
+            if timer:
+                timer.flush()
             return
         t_stt = time.perf_counter()
+        if timer:
+            timer.mark("stt_ended")
         text = (text or "").strip()
         if not text:
             log.info("empty transcript; ignoring")
+            if timer:
+                timer.flush()
             return
         log.info("heard: %r  (%.2fs audio, stt %.0fms)",
                  text, dur, (t_stt - t_rec) * 1000)
 
+        if timer:
+            timer.mark("route_started")
         reply = await self.think(http, text)
         t_think = time.perf_counter()
+        if timer:
+            timer.mark("route_ended")
         log.info("reply: %r  (think %.0fms)", reply, (t_think - t_stt) * 1000)
 
         if reply and self.speak_enabled:
-            await self.say(reply)
+            if timer:
+                timer.mark("tts_requested")
+            await self.say(reply, timer=timer)
+        if timer:
+            timer.flush()
         log.info("total wake-to-spoken: %.0f ms", (time.perf_counter() - t0) * 1000)
 
     async def think(self, http, text: str) -> str:  # noqa: ANN001
@@ -593,39 +629,59 @@ class Ears:
                 log.error("conversation failed: %s", exc2)
                 return ""
 
-    async def _play_beep(self, http) -> None:  # noqa: ANN001
-        """Play an acknowledgment beep through the Echo Dot speaker.
+    async def _play_beep(self, http, sound_name: str | None = None) -> None:  # noqa: ANN001
+        """Play a short acknowledgment sound through the Echo Dot speaker.
 
-        Mutes the mic during playback to avoid the beep being picked up and
-        re-triggering the wake word. Uses the same speaker pipeline as say().
+        `sound_name` picks a file from beeps/; None uses the configured
+        JARVIS_BEEP wake sound.
+
+        Dispatched non-blocking on purpose. The beep only has to START before
+        the recording window opens -- waiting out its ~865 ms length would be
+        felt as lag on every single turn. Note this does NOT mute the mic (an
+        earlier docstring claimed it did); the wake sound is short and the
+        preroll buffer plus the post-turn queue drain absorb it.
+
+        Every failure here is swallowed to a debug line: a missing or malformed
+        beep must never take down a turn. That same swallow is what hid the
+        bytes-vs-ndarray bug for weeks, so the raw frames are converted to an
+        int16 ndarray explicitly below rather than relying on the callee.
         """
         import speaker as SP  # type: ignore[speaker module is in host-spea]
         if not SP.SPEAKER:
             return
+        beep_path = self._beep_path if sound_name is None else os.path.join(
+            str(Path(__file__).resolve().parent / "beeps" / f"{sound_name}.wav")
+        )
         try:
             import wave
-            with wave.open(self._beep_path, "rb") as wf:
+            with wave.open(beep_path, "rb") as wf:
                 rate = wf.getframerate()
                 channels = wf.getnchannels()
                 sample_width = wf.getsampwidth()
-                frames = wf.readframes(wf.getnframes())
+                raw_bytes = wf.readframes(wf.getnframes())
             if channels != 1 or sample_width != 2:
                 log.debug("beep format not mono-16bit, skipping")
                 return
-            SP.SPEAKER.play_pcm(frames, src_rate=rate)
-            log.debug("played beep: %s", self._beep_path)
+            pcm = np.frombuffer(raw_bytes, dtype="<i2")
+            SP.SPEAKER.play_pcm(pcm, src_rate=rate, blocking=False)
+            log.debug("played sound: %s", beep_path)
         except FileNotFoundError:
-            log.debug("beep file not found: %s", self._beep_path)
+            log.debug("beep file not found: %s", beep_path)
         except Exception as exc:  # noqa: BLE001
             log.debug("beep failed: %s", exc)
 
-    async def say(self, text: str) -> None:
+    async def say(self, text: str, timer: TurnTimer | None = None) -> None:
         """Speak through the Echo, with the microphone muted for the duration."""
         import speaker as SP  # type: ignore[speaker module is in host-spea]
         self.muted = True
         try:
             pcm = await asyncio.to_thread(SP.synth, text)
+            if timer:
+                timer.mark("tts_first_audio")
+                timer.mark("playback_started")
             await asyncio.to_thread(SP.SPEAKER.play_pcm, pcm)
+            if timer:
+                timer.mark("playback_ended")
         except Exception as exc:  # noqa: BLE001
             log.error("speech failed: %s", exc)
         finally:
@@ -668,3 +724,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
