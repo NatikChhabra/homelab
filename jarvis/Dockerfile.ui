@@ -41,6 +41,11 @@ COPY speakers/ ./speakers/
 # Single port: the app serves both the page and the websocket. The old image
 # ran a Flask API and a python -m http.server on different ports, which meant
 # the page's fetch('/api/...') calls hit the static server and 404'd.
+# Stamp the image with the git SHA at build time so drift is detectable
+# instantly (one comparison) rather than by diffing 50 files.
+ARG GIT_SHA=unknown
+LABEL org.jarvis.git.sha="${GIT_SHA}"
+
 EXPOSE 3100
 
 CMD ["python", "-u", "voice_server.py"]
