@@ -1,6 +1,7 @@
 {
   "typeCheckingMode": "basic",
   "pythonVersion": "3.12",
+  "extraPaths": ["aether"],
   "reportMissingImports": true,
   "reportMissingTypeStubs": false,
   "reportOptionalMemberAccess": "warning",
