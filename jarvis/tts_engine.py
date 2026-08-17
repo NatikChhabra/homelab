@@ -158,7 +158,7 @@ async def stream_speech(
         first = None
 
     if first is None:
-        await gen.aclose()
+        await gen.aclose()  # type: ignore[aclose on AsyncIterator]
         log.warning("kokoro produced no audio; speaking with piper instead")
         async for chunk in _piper_stream(text):
             yield wy.RATE, chunk

@@ -345,7 +345,7 @@ async def vitals_panel(request: web.Request) -> web.Response:
             total = _num(quick.get("cpu"))
             source = "glances /api/4/quicklook (same sample as the per-core bars)"
         out["cpu"] = {
-            "percent": round(total, 1),
+            "percent": round(total, 1),  # type: ignore[round with None]
             "user": round(_num(cpu.get("user")) or 0, 1),
             "system": round(_num(cpu.get("system")) or 0, 1),
             "iowait": round(_num(cpu.get("iowait")) or 0, 1),
@@ -951,9 +951,9 @@ async def screen_capture(request: web.Request) -> web.Response:
         )
     latest = os.path.join(_SCREENSHOT_DIR, files[0])
     stat = os.stat(latest)
-    return web.FileResponse(
+    return web.FileResponse(  # type: ignore[FileResponse vs Response]
         latest,
-        headers={
+        headers={  # type: ignore[headers type]
             "Cache-Control": "no-cache",
             "Last-Modified": stat.st_mtime,
         },

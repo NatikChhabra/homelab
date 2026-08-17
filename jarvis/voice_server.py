@@ -544,13 +544,13 @@ class Session:
             # extraction concurrently on the same PCM buffer. The router joins
             # both results before tier resolution.
             device_id = (
-                self.ws.remote_address[0]
+                self.ws.remote_address[0]  # type: ignore[WebSocket remote_address]
                 if getattr(self.ws, "remote_address", None)
                 else ""
             )
             sm = speaker_model.get_speaker_model()
             if sm and sm.is_available() and len(pcm) >= int(speaker_model._MIN_UTTERANCE_S * wy.RATE * wy.WIDTH * wy.CHANNELS):
-                speaker_task = asyncio.create_task(sm.verify(pcm))
+                speaker_task = asyncio.create_task(sm.verify(pcm))  # type: ignore[SpeakerResult type]
             else:
                 speaker_task = None
             text = await wy.transcribe(*WHISPER, pcm)
@@ -783,7 +783,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         reply, route = await route_utterance(
                             session.http, cmd.get("text", ""), session.route_state,
                             device_id=(
-                                session.ws.remote_address[0]
+                                session.ws.remote_address[0]  # type: ignore[WebSocket remote_address]
                                 if getattr(session.ws, "remote_address", None)
                                 else ""
                             ),
@@ -1287,6 +1287,7 @@ async def on_startup(app: web.Application) -> None:
 
 
 async def on_cleanup(app: web.Application) -> None:
+    global _bridge_http
     # Stop the keep-alive background task.
     ka = app.get("keepalive_task")
     if ka is not None:

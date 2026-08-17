@@ -57,7 +57,7 @@ def _speed_to_pct(n: int) -> int:
 # Each entry: (compiled pattern, replacement callable or string, why).
 # Applied in order, first match wins.
 
-_RULES: list[tuple[re.Pattern[str], object, str]] = []
+_RULES: list[tuple[re.Pattern[str], str | object, str]] = []
 
 
 def _rule(pattern: str, repl, why: str) -> None:
@@ -444,7 +444,7 @@ def normalise(text: str) -> tuple[str, str]:
             out = repl(m) if callable(repl) else repl
             if out == text:
                 return text, ""
-            return out, why
+            return str(out), why
     return text, ""
 
 

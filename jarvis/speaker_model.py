@@ -332,7 +332,7 @@ class SpeakerModel:
         if not scores:
             return SpeakerResult(speaker_id=None, speaker_ms=embed_ms)
 
-        best_name = max(scores, key=scores.get)
+        best_name = max(scores, key=scores.get)  # type: ignore[max with None default]
         best_score = scores[best_name]
         # Margin = gap to runner-up.
         remaining = {k: v for k, v in scores.items() if k != best_name}
