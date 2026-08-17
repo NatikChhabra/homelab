@@ -53,7 +53,6 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import asyncio
@@ -552,7 +551,7 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
     if tool == "call_make":
         if "needs explicit confirmation" in (detail or ""):
             return "I will not make that call without you confirming it first."
-        if "not available" in low:
+        if "not available" in detail:
             return "Calling is not available right now, Sir."
 
     if tool == "web_search" and err == "disabled":
@@ -561,29 +560,29 @@ def _describe_failure(tool: str, payload: dict[str, Any] | None, detail: str) ->
         return "Web fetching is not available right now."
 
     # Missing error cases from earlier audit
-    if tool == "ha_call_service" and "cannot connect" in low:
+    if tool == "ha_call_service" and "cannot connect" in detail:
         return "I could not reach the lights, Sir."
     if "did not understand" in (detail or ""):
         return "I did not understand that, Sir."
 
     # Missing error cases from earlier audit
-    if tool == "ha_call_service" and "cannot connect" in low:
+    if tool == "ha_call_service" and "cannot connect" in detail:
         return "I could not reach the lights, Sir."
-    if tool == "conversation" and "did not understand" in low:
+    if tool == "conversation" and "did not understand" in detail:
         return "I did not understand that, Sir."
     if "turn_timeout" in (detail or ""):
         return "That took too long to process, Sir."
-    if tool.startswith("call_") and "not available" in low:
+    if tool.startswith("call_") and "not available" in detail:
         return "Calling is not available right now, Sir."
 
     # Transport-level problems, common to both services. "unreachable" is worth
     # saying out loud: a host service being down is something Natik can fix, and
     # silence here previously read as the model simply ignoring him.
     low = (detail or "").lower()
-    if "cannot connect" in low or "clientconnector" in low or "timeout" in low:
+    if "cannot connect" in low or "clientconnector" in low or "timeout" in detail:
         return ("I could not reach the PC." if tool.startswith("pc_")
                 else "I could not reach the WhatsApp bridge.")
-    if "http 401" in low:
+    if "http 401" in detail:
         return ("The PC agent rejected my token." if tool.startswith("pc_")
                 else "The WhatsApp bridge rejected my token.")
     return ""

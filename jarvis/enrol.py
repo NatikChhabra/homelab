@@ -225,7 +225,7 @@ def verify_signature(
         pub_pem = dev["public_key_pem"].encode("utf-8")
         pub_key = _ser.load_pem_public_key(pub_pem)
         payload = Signer.build_payload(timestamp, utterance, tool_name)
-        pub_key.verify(signature, payload.encode("utf-8"))
+        pub_key.verify(signature, payload.encode("utf-8"))  # type: ignore[call-arg,attribute-access]
         return VerifyResult(ok=True, verdict="ok", fingerprint=fingerprint,
                             identity=dev.get("identity", "guest"))
     except Exception as e:

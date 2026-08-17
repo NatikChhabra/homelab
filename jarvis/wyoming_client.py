@@ -115,6 +115,9 @@ async def transcribe(host: str, port: int, pcm: bytes, language: str = "en") -> 
             if attempt == 2:
                 raise
             await asyncio.sleep(0.4)
+    # Both attempts failed and were re-raised; this line is unreachable
+    # in normal operation but satisfies the type checker.
+    return ""
 
 
 async def synthesize(host: str, port: int, text: str, voice: str | None = None) -> bytes:

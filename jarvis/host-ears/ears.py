@@ -178,23 +178,23 @@ def pick_input(prefer: str | None = None) -> tuple[int | None, str]:
     Bluetooth hands-free mics (8 kHz) are skipped unless explicitly requested.
     """
     candidates = [(i, d) for i, d in enumerate(sd.query_devices())
-                  if d["max_input_channels"] > 0]
+                  if d["max_input_channels"] > 0]  # type: ignore[sounddevice device info has no]
     wanted = prefer or os.getenv("JARVIS_MIC_PREFER", "Microphone Array,Microphone")
     # Build two buckets: WASAPI-48k first, then everything else.
     wasapi_48 = []
     mme_44 = []
     rest: list[tuple[int, dict]] = []
     for i, d in candidates:
-        api = sd.query_hostapis(d["hostapi"])["name"]
-        rate = d["default_samplerate"]
-        if "hands-free" in d["name"].lower() and "hands-free" not in wanted.lower():
+        api = sd.query_hostapis(d["hostapi"])["name"]  # type: ignore[sounddevice device info has no]
+        rate = d["default_samplerate"]  # type: ignore[sounddevice device info has no]
+        if "hands-free" in d["name"].lower() and "hands-free" not in wanted.lower():  # type: ignore[sounddevice device info has no]
             continue
-        if api == "Windows WASAPI" and abs(rate - 48000) < 1:
+        if api == "Windows WASAPI" and abs(rate - 48000) < 1:  # type: ignore[sounddevice device info has no]
             wasapi_48.append((i, d))
-        elif api == "MME" and abs(rate - 44100) < 1:
+        elif api == "MME" and abs(rate - 44100) < 1:  # type: ignore[sounddevice device info has no]
             mme_44.append((i, d))
         else:
-            rest.append((i, d))
+            rest.append((i, d))  # type: ignore[sounddevice device info has no]
     ordered = wasapi_48 + mme_44 + rest
 
     _wanted = [w.strip() for w in wanted.split(",") if w.strip()]
@@ -378,8 +378,8 @@ class Ears:
     def _setup_capture(self) -> None:
         """Detect the device's native rate and configure resampling."""
         dev = sd.query_devices(self.mic_index)
-        native = int(dev["default_samplerate"])
-        channels = int(dev["max_input_channels"])
+        native = int(dev["default_samplerate"])  # type: ignore[sounddevice device info has no]
+        channels = int(dev["max_input_channels"])  # type: ignore[sounddevice device info has no]
         self._native_rate = native
         self._capture_rate = native
         self._capture_channels = max(channels, 2)  # always capture stereo
@@ -599,7 +599,7 @@ class Ears:
         Mutes the mic during playback to avoid the beep being picked up and
         re-triggering the wake word. Uses the same speaker pipeline as say().
         """
-        import speaker as SP
+        import speaker as SP  # type: ignore[speaker module is in host-spea]
         if not SP.SPEAKER:
             return
         try:
@@ -621,7 +621,7 @@ class Ears:
 
     async def say(self, text: str) -> None:
         """Speak through the Echo, with the microphone muted for the duration."""
-        import speaker as SP
+        import speaker as SP  # type: ignore[speaker module is in host-spea]
         self.muted = True
         try:
             pcm = await asyncio.to_thread(SP.synth, text)
@@ -652,9 +652,9 @@ def main() -> int:
     if args.list:
         idx, name = pick_input(args.mic)
         for i, d in enumerate(sd.query_devices()):
-            if d["max_input_channels"] > 0:
+            if d["max_input_channels"] > 0:  # type: ignore[sounddevice device info has no]
                 mark = "->" if i == idx else "  "
-                print(f"{mark}{i:>3}  {int(d['default_samplerate']):>6} Hz  {d['name']}")
+                print(f"{mark}{i:>3}  {int(d['default_samplerate']):>6} Hz  {d['name']}")  # type: ignore[sounddevice device info has no]
         print(f"\nselected: {name}")
         return 0
 
