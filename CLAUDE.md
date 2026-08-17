@@ -5,6 +5,106 @@ real time. This file is not advice; it is the operating contract.
 
 ---
 
+## 0. SERVER STACK OPERATIONAL NOTES
+
+**Run the server audit at the start of every session:**
+
+```bash
+bash /c/ServerData/Stacks/server-audit.sh
+```
+
+It takes about a minute, is strictly read-only, and reports on containers, ports, the media mount,
+disk, hardlinks, BitTorrent transport, DNS/TMDb, app health, library consistency, the scheduled
+jobs, the dub quality profile, and indexers. Report anything that comes back WARN or FAIL to the
+user, then fix it. If it is all clear, say so in one line and move on.
+
+The same script runs unattended every Sunday at 05:00 as the "ServerData - Weekly Audit" scheduled
+task, writing `Stacks/server-audit-report.txt`. If a session starts and that report is recent, read
+it rather than re-running from scratch.
+
+Every check in that script exists because the thing it looks for actually broke once and went
+unnoticed. When adding a check, add a comment naming the incident. Do not delete checks to make the
+output shorter.
+
+**What this directory is:** `C:\ServerData` is a persistent data/config root for a Windows 11
+home server running self-hosted apps via Docker Desktop. No app code to build/lint/test here.
+Work = editing Docker Compose stacks, app config files, managing container/volume state.
+
+Each top-level folder (`AdGuard/`, `Jellyfin/`, `Radarr/`, `Sonarr/`, `Bazarr/`, `Prowlarr/`,
+`Jellyseerr/`, `Maintainerr/`, `Cleanuparr/`, `qBittorrent/`, `Vaultwarden/`, `Vikunja/`,
+`Immich/`, `Traccar/`): bind-mounted config/data dir for the matching container — runtime state
+(SQLite/Postgres DBs, YAML configs, logs, media libraries), not code. Leave alone unless debugging
+that service.
+
+**`D:\Media`** (NOT under `C:\ServerData` — moved 2026-07-28): media library
+(`Media/library/{movies,tv,anime}`), torrent download/staging area
+(`Media/torrents/{complete,incomplete}`) and `Media/recyclebin`, shared across *arr apps +
+qBittorrent, all mounted as `/data`. D: is a 450GB HDD; C: is the NVMe SSD and keeps only app
+databases. `library/` and `torrents/` MUST stay on the same filesystem or Sonarr's hardlinking
+breaks and every import silently doubles disk use.
+
+`D:\Backups`: nightly volume/config archives, 14-day retention. Deliberately on a different
+physical disk from the live data.
+
+`Sync/`: unrelated personal file sync storage (exposed via Filebrowser), not part of media stack.
+
+**Stack definitions** — all Docker Compose files under `Stacks/<stack-name>/docker-compose.yml`:
+
+- `Stacks/streaming/` — main media stack: qbittorrent, prowlarr, flaresolverr, sonarr, radarr,
+  bazarr, jellyfin, jellyseerr, maintainerr, cleanuparr. Largest, most frequently edited stack.
+- `Stacks/homarr/` — dashboard (homarr).
+- `Stacks/filebrowser/` — exposes `Sync/` over web UI.
+- `Stacks/uptime-kuma/` — uptime monitoring.
+- `Stacks/vaultwarden/` — password manager.
+- `Stacks/vikunja/` — task manager.
+- `Stacks/server-room/` — glances host-metrics container.
+
+Note: AdGuard, Immich, Traccar have data dirs at top level but **no** `docker-compose.yml` under
+`Stacks/` — provisioned/run elsewhere. Don't assume a compose file exists for them without checking.
+
+Config conventions:
+- Containers use `PUID=1000`, `PGID=1000`, `TZ=Asia/Kolkata` where applicable (linuxserver.io images).
+- The streaming stack keeps app config in **external named volumes** (`sonarr_config`,
+  `jellyfin_config`, `qbittorrent_config`, ...), declared `external: true`. Only the media tree is a
+  bind mount, and it now comes from `D:/Media`.
+- `restart: always` standard on every service.
+- The *arr services and Jellyfin all set `dns: 1.1.1.1 / 8.8.8.8` plus
+  `net.ipv6.conf.all.disable_ipv6=1`. This is required: the ISP's resolver hijacks
+  `api.themoviedb.org`, so a container without it silently loses all metadata.
+- Credentials for the automation scripts live in `Stacks/secrets.env` (ACL-restricted). Never
+  hardcode an API key or password in a script — they get swept into the nightly backup.
+
+**Common commands** (run from inside the relevant `Stacks/<stack-name>/` directory in PowerShell):
+
+```powershell
+docker compose up -d          # start/update the stack
+docker compose down           # stop and remove containers (volumes persist)
+docker compose pull           # pull latest images
+docker compose logs -f <svc>  # tail logs for one service
+docker compose restart <svc>  # restart a single service after a config change
+```
+
+After editing `docker-compose.yml`, apply with `docker compose up -d` in that stack's dir.
+
+**Working on this repo:**
+- Each `docker-compose.yml` is source of truth for a service's ports, volumes, env vars.
+- Ports in use (avoid collisions): 8095 (filebrowser), 7575 (homarr), 61208 (glances),
+  8080/6881 (qbittorrent), 9696 (prowlarr), 8191 (flaresolverr), 8989 (sonarr),
+  7878 (radarr), 6767 (bazarr), 8096 (jellyfin), 5055 (jellyseerr), 6246 (maintainerr),
+  11011 (cleanuparr), 3001 (uptime-kuma), 8222 (vaultwarden), 3456 (vikunja),
+  2283 (immich), 9443 (portainer).
+- `homarr` compose has hardcoded `SECRET_ENCRYPTION_KEY`; `vikunja` has placeholder
+  `YOUR-LAPTOP-IP` in `VIKUNJA_SERVICE_PUBLICURL` — environment-specific, not templates.
+- Don't delete/rewrite files under app data directories — live application state.
+
+**Session hygiene:**
+- Use `/clear` for unrelated tasks; use `/compact` at natural breakpoints and steer it.
+- Prefer targeted commands (`docker logs --tail 50 <svc>`, `docker inspect --format`, grep)
+  over dumping full files or full output.
+- Don't re-read files already read earlier in the same session unless they've changed on disk.
+
+---
+
 ## 1. WHAT THIS IS
 
 **JARVIS** — a local-first voice assistant on a Windows 11 home server. Always listening for
@@ -52,12 +152,12 @@ purpose**. If a change *could* touch the loop, stop and ask before making it.
 
 - **Never print a secret, in whole or in part, for any reason** — not to confirm it, not to
   say it's redacted, not the first and last eight characters, not hashed "for convenience".
-- Report a leak as a **location plus a short hash** (`sha256:a3f1…`), never a value.
+- Report a leak as a **location plus a short hash** (`sha256:a3f1...`), never a value.
 - Verify a secret exists **by count**: `grep -c "^KEY=" file` must return `1`.
 - Run `scan-secrets.sh` before writing **any** report.
 - Reports go to **repo root**. Never `C:/ServerData/Sync/` — it is HTTP-served on port 8095.
 - Secrets live only in `secrets.env`: gitignored, ACL-restricted to owner/SYSTEM/Administrators.
-- Never commit a `.env`. Verify with `git ls-files | grep -i "secret\|\.env"` → empty.
+- Never commit a `.env`. Verify with `git ls-files | grep -i "secret|\.env"` → empty.
 
 ---
 
