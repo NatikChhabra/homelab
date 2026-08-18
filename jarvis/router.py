@@ -176,7 +176,7 @@ _INDIVIDUAL_LIGHT_RE = re.compile(
 # backlight light entities, not the switch entities. Fast-path bypasses HA
 # entirely and calls homeassistant.turn_on/off with the three switch entity ids.
 _ALL_LIGHTS_RE = re.compile(
-    r"^(?:turn\s+)?(on|off)\s+the\s+lights?$",
+    r"^(?:(?:turn\s+)?(on|off)\s+(?:the\s+)?lights?|lights?\s+(on|off))$",
     re.I,
 )
 _ALL_LIGHTS_EIDS = [
@@ -635,7 +635,7 @@ class IntentRouter:
         # the router stays local and fast (<50 ms) for the most-common commands.
         m = _INDIVIDUAL_LIGHT_RE.match(text.strip())
         if m and self.enabled:
-            action = m.group(1).lower()  # "on" or "off"
+            action = m.group(1).lower()  # "on" or "off"; group 2 is the gang
             gang = m.group(2).lower().replace(" ", "")
             eid = _LIGHT_GANG.get(gang)
             if eid:
@@ -668,7 +668,9 @@ class IntentRouter:
         # was supposed to provide but the bind mount is stale in-container.
         m = _ALL_LIGHTS_RE.match(text.strip())
         if m and self.enabled:
-            action = m.group(1).lower()
+            # Two alternations: "turn on the lights" -> group 1,
+            # "lights on" -> group 2. Exactly one is ever set.
+            action = (m.group(1) or m.group(2)).lower()
             t0 = time.perf_counter()
             try:
                 async with session.post(
