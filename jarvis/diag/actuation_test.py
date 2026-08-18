@@ -32,7 +32,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "aether"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "jarvis"))
 
-from kernel.router import IntentRouter  # noqa: E402
+# MUST be jarvis/router.py, NOT aether/kernel/router.py.
+#
+# INCIDENT 2026-08-18: this file imported `kernel.router` (aether) and reported
+# 40/40 PASS while the DEPLOYED router crashed. jarvis/router.py is what
+# Dockerfile.ui bakes into jarvis-voice as /app/router.py; aether/kernel/router.py
+# is a separate 45 KB fork with different regex group numbering. The aether fork
+# handled "lights on" correctly via (group(2) or group(3)); the deployed jarvis
+# router did `m.group(1).lower()` on a 2-group regex, so "lights on" raised
+# AttributeError in production. The battery could not see it because it was
+# testing a module that is not shipped.
+#
+# If this import ever needs to change, the question to answer first is: which
+# module does the running container execute? Test that one.
+from router import IntentRouter  # noqa: E402
 
 HASS = os.getenv("HASS_URL", "http://localhost:8123").rstrip("/")
 TOKEN = os.getenv("JARVIS_HASS_TOKEN") or os.getenv("HA_API_TOKEN", "")
