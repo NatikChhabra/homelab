@@ -56,6 +56,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -177,6 +178,42 @@ def synth(text: str, voice: str | None = None) -> np.ndarray:
             time.sleep(0.3)
 
 
+def synth_stream(text: str, voice: str | None = None,
+                 chunk_size: int = 2048) -> Iterator[np.ndarray]:
+    """Stream headerless PCM chunks from Kokoro.
+
+    Yields int16 mono numpy arrays as they arrive. Kokoro's streaming endpoint
+    returns raw PCM chunks (no WAV header) when `stream=true` and
+    `response_format=pcm`. This avoids waiting for full sentence synthesis.
+
+    Each yielded chunk is approximately `chunk_size` bytes (1024 samples @ 24 kHz).
+    """
+    body = json.dumps({
+        "model": "kokoro",
+        "voice": voice or KOKORO_VOICE,
+        "input": text,
+        "response_format": "pcm",
+        "speed": KOKORO_SPEED,
+        "stream": True,
+    }).encode()
+    req = urllib.request.Request(
+        f"{KOKORO_URL}/v1/audio/speech", data=body,
+        headers={"Content-Type": "application/json"})
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                while True:
+                    chunk = r.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield np.frombuffer(chunk, dtype="<i2")
+            return
+        except (OSError, ConnectionError, urllib.error.URLError):
+            if attempt == 2:
+                raise
+            time.sleep(0.3)
+
+
 class Speaker:
     """Serialises playback so two replies never overlap into noise."""
 
@@ -189,6 +226,26 @@ class Speaker:
 
     def say(self, text: str, voice: str | None = None) -> None:
         self.q.put((text, voice))
+
+    def play_stream(self, stream: Iterator[np.ndarray], src_rate: int = KOKORO_RATE,
+                    on_first_chunk=None) -> str:
+        idx, name, rate = pick_device()
+        if idx is None:
+            raise RuntimeError('no output device')
+
+        first = True
+        with self.lock:
+            with sd.OutputStream(samplerate=rate, channels=1, dtype='int16', device=idx) as st:
+                for chunk in stream:
+                    if chunk.size == 0:
+                        continue
+                    audio = resample(chunk, src_rate, rate)
+                    st.write(audio)
+                    if first:
+                        first = False
+                        if callable(on_first_chunk):
+                            on_first_chunk()
+        return name
 
     def play_pcm(self, pcm: np.ndarray, src_rate: int = KOKORO_RATE,
                  blocking: bool = True) -> str:

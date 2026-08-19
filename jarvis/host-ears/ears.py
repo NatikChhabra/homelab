@@ -675,13 +675,20 @@ class Ears:
         import speaker as SP  # type: ignore[speaker module is in host-spea]
         self.muted = True
         try:
-            pcm = await asyncio.to_thread(SP.synth, text)
             if timer:
-                timer.mark("tts_first_audio")
-                timer.mark("playback_started")
-            await asyncio.to_thread(SP.SPEAKER.play_pcm, pcm)
+                timer.mark('tts_requested')
+
+            def _on_first_chunk():
+                if timer:
+                    timer.mark('tts_first_audio')
+                    timer.mark('playback_started')
+
+            stream = SP.synth_stream(text)
+            await asyncio.to_thread(
+                SP.SPEAKER.play_stream, stream, SP.KOKORO_RATE, _on_first_chunk
+            )
             if timer:
-                timer.mark("playback_ended")
+                timer.mark('playback_ended')
         except Exception as exc:  # noqa: BLE001
             log.error("speech failed: %s", exc)
         finally:
