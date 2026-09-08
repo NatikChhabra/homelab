@@ -58,14 +58,29 @@ services:
       USE_AIKAR_FLAGS: "true"
 
       # ---- Auto-pause ---------------------------------------------------
-      # SIGSTOPs the JVM when nobody is connected. This frees CPU, NOT RAM --
-      # the heap stays resident. It is here because the CPU matters: an idle
-      # modded server still ticks, and those ticks compete with Whisper STT
-      # and Kokoro TTS on the same 8 cores, adding latency to the voice loop.
-      # Paused, Minecraft uses ~0% CPU and JARVIS gets the whole machine.
+      # SIGSTOPs the JVM when nobody is connected. Frees CPU, NOT RAM -- the
+      # heap stays resident.
+      #
+      # MEASURED 2026-09-09, and it downgrades this feature: host CPU averaged
+      # 21.9% across 16 logical processors, i.e. ~12 threads idle. CPU is NOT
+      # the scarce resource here, RAM is -- and autopause does nothing for RAM.
+      # So this is kept for the marginal win (no GC or chunk ticking while
+      # nobody plays) rather than as the load-bearing optimisation it would be
+      # on a busier box. Do not trade anything valuable to keep it.
+      #
+      # CONFLICT WITH THE HOMARR TILE -- read before changing either:
+      # ANY tcp connect to 25565 wakes a paused server, a status ping included,
+      # and itzg's autopause offers no way to distinguish a ping from a login.
+      # A Homarr Minecraft widget polling every 30 s therefore keeps the server
+      # awake permanently and autopause never engages at all. With the widget
+      # set to a 10-minute interval it wakes, waits AUTOPAUSE_TIMEOUT_KN, and
+      # re-pauses -- paused roughly 8 minutes in every 10, and the tile still
+      # works. That interval is the whole reason both features can coexist; see
+      # README.md "Homarr tile".
       ENABLE_AUTOPAUSE: "true"
       AUTOPAUSE_TIMEOUT_EST: "1800"         # 30 min after last player leaves
       AUTOPAUSE_TIMEOUT_INIT: "900"         # 15 min after boot with no joins
+      AUTOPAUSE_TIMEOUT_KN: "120"           # re-pause 2 min after a bare ping
 
       # Required by autopause: a paused process makes one tick appear to last
       # for the whole pause, and the server watchdog would kill the server on
