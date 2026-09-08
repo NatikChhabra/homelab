@@ -27,9 +27,15 @@ services:
     # voice container, silently breaking the voice loop. With mem_limit set,
     # Docker kills MINECRAFT instead and restart:always brings it back. The
     # blast radius stays inside this stack.
-    #   6G heap + ~512M metaspace (large mod count) + ~512M GC/threads/code
-    #   cache + ~256M direct buffers = ~7.3G. 7680m leaves a little slack.
-    mem_limit: 7680m
+    #   4G heap + ~512M metaspace (large mod count) + ~512M GC/threads/code
+    #   cache + ~256M direct buffers = ~5.2G. 5632m leaves a little slack.
+    #
+    # 5632m (5.5G) NOT 7680m: this is the no-restart operating value. The WSL
+    # VM cap is still 10 GB until the utility VM is restarted, and ~3.3 GB of
+    # protected containers stay resident under game mode, so this is what
+    # actually fits today. Raise to 7680m with MEMORY 6G once the VM restarts
+    # and picks up the 11GB cap already written into .wslconfig.
+    mem_limit: 5632m
 
     environment:
       EULA: "TRUE"
@@ -41,7 +47,19 @@ services:
       # CF_API_KEY is baked into this image for Java 17+ builds. Do NOT add
       # one here -- it would be a secret in a tracked file.
       TYPE: AUTO_CURSEFORGE
-      CF_SLUG: tensura-evolutions-1-21-1
+
+      # BLOCKED BY THE PACK AUTHORS, not by configuration. CF_SLUG cannot be
+      # used for this pack: Tensura Evolutions has CurseForge's third-party
+      # distribution flag set to "not allowed", so the API refuses to serve the
+      # file to any automated installer. The first start failed with:
+      #   "The modpack authors have indicated this file is not allowed for
+      #    project distribution."
+      # That is a deliberate choice by the authors. The only supported path is
+      # a human downloading the zip and placing it in ./modpack/ -- see
+      # modpack/PUT-THE-ZIP-HERE.txt.
+      #
+      # CF_SLUG: tensura-evolutions-1-21-1     # unusable, see above
+      CF_MODPACK_ZIP: /modpacks/modpack.zip
 
       # PIN THIS AFTER THE FIRST SUCCESSFUL START. Left unset on purpose:
       # guessing a matcher that does not match makes the container fail at
@@ -52,9 +70,17 @@ services:
       # CF_FILENAME_MATCHER: "1.0.69.9"
 
       # ---- Memory -------------------------------------------------------
-      # 6G is the ceiling this hardware can honestly sustain, NOT the 8-12G
-      # the pack recommends. See README.md "Memory reality" for the arithmetic.
-      MEMORY: 6G
+      # 4G, and that is BELOW the pack's 8G minimum -- deliberately, because it
+      # is what fits without restarting the VM and taking the whole server down.
+      #
+      # MEASURED 2026-09-09 with game mode on INCLUDING the jarvis stack: VM
+      # MemAvailable 8.70 GB, of which 5.34 GB was MemFree -- memory the VM
+      # already owns. A 5.2 GB footprint fits inside that free pool, so
+      # Minecraft costs Windows nothing extra. 6G (7.3 GB) would exceed the
+      # free pool and force the VM to claim ~2 GB more from a host that had
+      # 1.65 GB available: paging, and therefore voice-loop latency. That is
+      # the whole reason this is 4G. See README.md "Memory reality".
+      MEMORY: 4G
       USE_AIKAR_FLAGS: "true"
 
       # ---- Auto-pause ---------------------------------------------------
@@ -120,6 +146,12 @@ services:
       # plus constant chunk writes). A named volume lives on the VM's native
       # ext4 VHDX and avoids the translation entirely.
       - minecraft_data:/data
+      # Read-only drop folder for the manually downloaded pack. Bind-mounted
+      # from C: rather than a named volume precisely BECAUSE it is slow-path:
+      # it is read once at startup, and a human has to be able to drag a file
+      # into it from Explorer. :ro so the server can never modify or delete the
+      # one copy of a file that cannot be re-downloaded automatically.
+      - ./modpack:/modpacks:ro
 
 volumes:
   minecraft_data:

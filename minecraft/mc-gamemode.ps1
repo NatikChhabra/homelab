@@ -21,8 +21,11 @@
         portainer      ~53 MB
         filebrowser    ~30 MB
 
-    NEVER STOPPED, and each for a specific reason:
-        jarvis      - the voice loop is the prime directive. Untouchable.
+    NOT STOPPED by a plain -On, each for a specific reason:
+        jarvis      - the voice loop. Stopped ONLY with the explicit
+                      -IncludeJarvis switch, never by default. It is ~2.75 GB
+                      (mostly jarvis-ollama) and is the largest single block of
+                      memory on the box, which is why the switch exists at all.
         adguard     - DNS for every device on the tailnet. Stopping it takes
                       the whole house off the internet, not just this box.
         homarr      - the dashboard, and the thing you would use to notice
@@ -55,7 +58,24 @@
 param(
     [Parameter(ParameterSetName = 'On')]     [switch]$On,
     [Parameter(ParameterSetName = 'Off')]    [switch]$Off,
-    [Parameter(ParameterSetName = 'Status')] [switch]$Status
+    [Parameter(ParameterSetName = 'Status')] [switch]$Status,
+
+    # Also stop the JARVIS stack -- roughly 2.75 GB, most of it jarvis-ollama.
+    #
+    # THIS BREAKS THE VOICE LOOP. Wake word, speech-to-text, the LLM and
+    # speech-out all stop answering until -Off. It exists because Natik asked
+    # for it explicitly on 2026-09-09 to fit Minecraft, and it is the largest
+    # single block of memory on the box. It is deliberately opt-in and never
+    # part of a plain -On, because the voice loop is the one thing that is
+    # supposed to survive everything else.
+    #
+    # Does NOT touch the "JARVIS - Keep Awake" scheduled task, which is what
+    # stops the host entering Modern Standby. Killing that risks the machine
+    # sleeping and taking the server off the network entirely -- the exact
+    # outage this box has lost hours to before.
+    [Parameter(ParameterSetName = 'On')]
+    [Parameter(ParameterSetName = 'Off')]
+    [switch]$IncludeJarvis
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,6 +95,15 @@ $Optional = @(
 )
 
 $Protected = @('jarvis', 'adguard', 'homarr', 'vaultwarden', 'minecraft')
+
+# -IncludeJarvis moves jarvis out of Protected and onto the end of the stop
+# list. AdGuard stays protected regardless: it is DNS for every device on the
+# tailnet, so stopping it takes the house off the internet rather than just
+# degrading this box.
+if ($IncludeJarvis) {
+    $Protected = $Protected | Where-Object { $_ -ne 'jarvis' }
+    $Optional  = $Optional + 'jarvis'
+}
 
 function Get-MemPicture {
     $os    = Get-CimInstance Win32_OperatingSystem
@@ -139,9 +168,22 @@ function Invoke-Stacks {
         }
         Write-Host ("  {0} {1} ..." -f $Action, $s) -NoNewline
         # Sequential on purpose. Do not parallelise docker compose here.
-        & docker compose --project-directory $dir $Action 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Host ' ok' -ForegroundColor Green }
-        else { Write-Host (' FAILED (exit {0})' -f $LASTEXITCODE) -ForegroundColor Red; $failed += $s }
+        #
+        # Do NOT write this as `... 2>&1 | Out-Null`. Under Windows PowerShell
+        # 5.1, redirecting a NATIVE command's stderr wraps each line in an
+        # ErrorRecord (NativeCommandError). docker compose writes its ordinary
+        # progress ("Container maintainerr Stopping") to stderr, so with
+        # $ErrorActionPreference = 'Stop' the script threw on a perfectly
+        # successful stop -- it aborted midway through the streaming stack on
+        # 2026-09-09 having actually stopped everything it reported. Exit code
+        # is the truth here, not the stream.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & docker compose --project-directory $dir $Action 2>$null | Out-Null
+        $rc = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($rc -eq 0) { Write-Host ' ok' -ForegroundColor Green }
+        else { Write-Host (' FAILED (exit {0})' -f $rc) -ForegroundColor Red; $failed += $s }
     }
 
     Start-Sleep -Seconds 3
@@ -159,7 +201,12 @@ if ($On) {
     Write-Host 'GAME MODE ON - stopping non-essential stacks' -ForegroundColor Magenta
     Invoke-Stacks -Stacks $Optional -Action stop
     Write-Host ''
-    Write-Host 'JARVIS, AdGuard, Homarr and Vaultwarden are still up.' -ForegroundColor Green
+    if ($IncludeJarvis) {
+        Write-Host 'JARVIS IS DOWN - the voice loop will not answer until -Off.' -ForegroundColor Yellow
+        Write-Host 'AdGuard, Homarr and Vaultwarden are still up.' -ForegroundColor Green
+    } else {
+        Write-Host 'JARVIS, AdGuard, Homarr and Vaultwarden are still up.' -ForegroundColor Green
+    }
     Write-Host 'Run  .\mc-gamemode.ps1 -Off  when you finish playing.' -ForegroundColor Green
 }
 elseif ($Off) {
