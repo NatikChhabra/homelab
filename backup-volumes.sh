@@ -33,7 +33,15 @@ HELPER_IMAGE="${BV_HELPER_IMAGE:-valkey/valkey:9}"
 #   immich_model-cache - downloaded ML models, ~820MB, regenerate on demand
 #   *_static           - build artefacts
 #   64-hex names       - anonymous volumes, no durable state
-SKIP_RE='^(immich_model-cache|wger_wger_static|[0-9a-f]{64})$'
+#   minecraft_data     - ~15 GB, and almost all of it is a CurseForge modpack
+#                        unpacked into hundreds of jars that re-download on
+#                        demand. At 14-day retention it would put ~210 GB of
+#                        recoverable files onto a 180 GB drive and push every
+#                        other archive off it. The part that genuinely cannot
+#                        be recovered -- the world -- is backed up separately
+#                        and more often by minecraft/mc-backup.sh, which
+#                        server-audit.sh section 26 checks is actually running.
+SKIP_RE='^(immich_model-cache|wger_wger_static|minecraft_data|[0-9a-f]{64})$'
 
 # App data that is bind-mounted rather than in a Docker volume, so volume
 # discovery alone would silently miss it. Vaultwarden is first on purpose.
