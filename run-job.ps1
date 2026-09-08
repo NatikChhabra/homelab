@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('rolling-window', 'update-audit', 'orphan-cleanup', 'server-audit', 'backup-volumes')]
+    [ValidateSet('rolling-window', 'update-audit', 'orphan-cleanup', 'server-audit', 'backup-volumes', 'mc-backup')]
     [string]$Job
 )
 
@@ -122,6 +122,35 @@ $Jobs = @{
         }
         Timeout   = 1800
     }
+    'mc-backup'      = @{
+        Script    = '/c/ServerData/Stacks/minecraft/mc-backup.sh'
+        # DELIBERATELY EMPTY, and this is the one place that needs explaining
+        # rather than copying the pattern above. The other jobs learned the
+        # hard way that '' means no monitoring at all. Here there is no Uptime
+        # Kuma push token yet because none has been created, and inventing a
+        # token name would make every run emit "secrets.env has no usable
+        # value" -- alert noise that gets ignored, which is worse than silence.
+        #
+        # The gap is covered instead: server-audit.sh section 26 fails if no
+        # world archive newer than 8 days exists in D:\Backups\minecraft. A
+        # silently dead backup therefore surfaces in the weekly audit rather
+        # than never. Create KUMA_PUSH_MC_BACKUP and set it here if you want
+        # same-day notice instead of same-week.
+        PushTokenName = ''
+        Env       = @{
+            # D: on purpose, same reasoning as backup-volumes: a different
+            # physical disk from the C: SSD holding the live world.
+            'MC_BACKUP_DIR'     = '/d/Backups/minecraft'
+            # 7 rather than 14. A world tar is a few GB and D: has 180 GB free
+            # shared with the media library; the modpack itself is excluded and
+            # re-downloadable, so only the world is being retained here.
+            'MC_RETENTION_DAYS' = '7'
+            'MC_LOG_FILE'       = '/c/ServerData/Stacks/minecraft/mc-backup.log'
+        }
+        # A few GB of world through gzip. Generous; the script exits in seconds
+        # when the volume does not exist yet.
+        Timeout   = 1800
+    }
     'orphan-cleanup' = @{
         Script    = '/c/ServerData/Stacks/orphan-cleanup.sh'
         PushTokenName = 'KUMA_PUSH_ORPHAN_CLEANUP'
@@ -180,9 +209,18 @@ function Write-Status {
         exitCode     = $Code
         summary      = $Summary
         durationSec  = [math]::Round($Seconds, 1)
-        # false means this job expects an Uptime Kuma monitor but its token
-        # could not be resolved from secrets.env, so no heartbeat was sent.
-        heartbeatConfigured = (-not $PushTokenBroken)
+        # false means NO heartbeat was sent for this run -- either the job
+        # declares a token that could not be resolved from secrets.env, or it
+        # declares no token at all.
+        #
+        # The second half used to be missing, and it mattered: a job with
+        # PushTokenName = '' is not "broken", so this field reported true while
+        # the job had no monitoring whatsoever. That is precisely how the
+        # nightly backup ran unmonitored until 2026-07-28 -- the one field that
+        # should have flagged it was reporting healthy. A job that nothing
+        # watches must not look watched.
+        heartbeatConfigured = ((-not $PushTokenBroken) -and
+                               -not [string]::IsNullOrWhiteSpace($Def.PushTokenName))
         finishedUtc  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         finishedLocal= (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         runLog       = $RunLog

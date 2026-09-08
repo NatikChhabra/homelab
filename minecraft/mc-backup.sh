@@ -69,6 +69,11 @@ fi
 
 # Same invocation shape as backup-volumes.sh, including MSYS_NO_PATHCONV, which
 # stops Git Bash rewriting the container-side paths into Windows paths.
+# NOTE THE .tgz EXTENSION -- do not "tidy" it to .tar.gz. backup-volumes.sh
+# prunes with `find /d/Backups -name '*.tar.gz' -mtime +14 -delete`, which
+# recurses into this subdirectory. A rename would hand these archives to that
+# job's 14-day retention instead of the 7-day one here, silently, and the two
+# scripts would be deleting each other's files.
 ARCHIVE="$DEST/world-${STAMP}.tgz"
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${VOLUME}:/source:ro" -v "${DEST}:/backup" \

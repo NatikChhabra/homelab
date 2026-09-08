@@ -147,8 +147,24 @@ bash mc-backup.sh              # world only -> D:\Backups\minecraft, 7-day reten
 up by this script instead. It flushes through RCON first and re-enables saving
 even if the tar fails.
 
-Not yet scheduled. Add it to Task Scheduler alongside the other jobs once you
-are happy with it.
+**Scheduled and verified.** `ServerData - Minecraft World Backup` runs daily at
+03:30 via the existing `run-job.ps1` wrapper (`-Job mc-backup`), so it inherits
+that wrapper's locking, transcript logging, log rotation and failure reporting
+rather than reinventing them. 03:30 was chosen to avoid the 04:00 / 04:30 /
+05:00 / 05:30 slots the other jobs already hold.
+
+Its status file reports `heartbeatConfigured: false`, and that is **accurate,
+not a fault**: no Uptime Kuma push token exists for this job yet. The gap is
+covered by audit section 26, which fails when no world archive is newer than
+8 days — so a silently dead backup surfaces weekly rather than never. Create
+`KUMA_PUSH_MC_BACKUP` and set it in `run-job.ps1` if you want same-day notice.
+
+### Do not add an Uptime Kuma monitor for port 25565
+
+Same trap as the Homarr tile, but worse: Kuma polls every 60 s by default, and
+every poll is a TCP connect that wakes an autopaused server. A Kuma monitor
+would keep the JVM permanently awake. If you want Kuma coverage, monitor the
+*container* rather than the port.
 
 ---
 
@@ -183,16 +199,46 @@ cd C:\ServerData\Stacks\homarr
 docker compose up -d
 ```
 
-Then add a Minecraft widget in Homarr with:
+### What to add at `:7575`
+
+Three tiles. Together they cover status, control and console, and they add
+**zero** new containers — which matters, because RAM is the constraint.
+
+**1. Minecraft server status widget** — online/offline, player count, MOTD.
 
 - **Server address:** `minecraft:25565` — the container name, *not* the
-  Tailscale IP. Homarr runs status checks server-side from inside its own
+  Tailscale address. Homarr runs status checks server-side from inside its own
   container, which is why it joins every stack network. Same reasoning as every
-  existing tile.
-- **RCON:** host `minecraft`, port `25575`, password from `Stacks/minecraft/.env`
+  existing tile. Pointed at the Tailscale IP it shows red while the server is
+  perfectly healthy.
+- **Refresh interval: set this to 10 minutes. Not the default.** This is not a
+  preference. Every status ping is a TCP connect, and a TCP connect *wakes an
+  autopaused server* — itzg's autopause cannot tell a ping from a login. At the
+  default poll rate the server never pauses at all and the feature is dead
+  config. At 10 minutes it wakes, waits 120 s, and re-pauses: paused ~8 minutes
+  in every 10, and the tile still works.
 
-Do not point the status check at the server's Tailscale address — it will show
-red even when the server is perfectly healthy.
+**2. A link tile to Portainer** (`:9443`) for start / stop / restart / logs.
+
+Homarr **cannot** do this itself — it has no Docker socket mounted, and it is
+not getting one. Portainer already holds
+`/run/host-services/docker.proxy.sock` and already does the job. Mounting the
+socket into a second web-facing container would duplicate an existing
+capability while doubling the blast radius of anything that reaches it: the
+Docker socket is root-equivalent on the host.
+
+**3. A bookmark tile for the console one-liner** (Homarr cannot run commands):
+
+```bash
+docker exec minecraft rcon-cli <command>
+# e.g.  rcon-cli list          - who is online
+#       rcon-cli op Natik      - grant yourself operator
+#       rcon-cli save-all      - force a save before a backup
+```
+
+RCON port 25575 is deliberately unpublished; this reaches it from inside the
+container, so nothing is exposed. Note that `docker exec` also wakes a paused
+server, for the same reason as the status ping.
 
 ---
 
@@ -211,16 +257,71 @@ over the tailnet, like everything else here.
 
 ---
 
-## Adding more mods (next phase)
+## Graphics and extra mods (phase 2, not installed)
 
-Not started — you asked to confirm this is right first.
+### First, the thing that trips everyone up
 
-When we do: the pack's own mods come from CurseForge via `AUTO_CURSEFORGE` and
-must not be hand-edited. Additions go through `CF_FORCE_INCLUDE_MODS` or a
-separately mounted directory, so a pack update cannot silently delete them.
-Every client must run a byte-identical mod set — which is the main reason
-server-side-only additions (Paper-style plugins) are attractive, and NeoForge
-does not offer them.
+**Tensura Evolutions is already a modpack** — hundreds of curated mods. Most of
+what feels "missing" is already inside it. Bolting extra gameplay mods onto a
+curated quest/progression pack is the standard way to break the quest book,
+the balance, or both. So: performance and visuals only, and leave the pack's
+own progression alone.
+
+**Shaders and rendering mods are 100% client-side.** Nothing about graphics goes
+on this server. The server has no GPU involvement whatsoever — it does not
+render a single frame. All of the below goes into *your launcher profile on your
+main PC*, and only the server-side section touches this box.
+
+### Client side — graphics (your PC, your launcher)
+
+For NeoForge 1.21.1 the stack is **Sodium (NeoForge build) + Iris**.
+
+Not Embeddium, and not Oculus. Those are the legacy path for 1.20.1 and older,
+where native Iris did not exist yet. On 1.21.1 Iris supports NeoForge directly
+and wants the official NeoForge build of Sodium. Installing the Embeddium/Oculus
+pair here is the most common way to end up with a broken launcher on this
+version.
+
+Shader pack, at the "average, not crushing" weight you asked for:
+
+| Pack | Why |
+|---|---|
+| **Complementary Reimagined** *(recommendation)* | The best-optimised of the good-looking packs, and it ships scalable presets — start on Medium. Looks substantially better than vanilla without the frame cost of the heavy packs. |
+| **BSL Shaders** | Equally popular, slightly prettier water and skies, slightly heavier. Fine alternative if you prefer the look. |
+
+Avoid the ray-traced / path-traced packs (SEUS PTGI, Rethinking Voxels) — they
+are far past "average" and would be unplayable alongside a 400-mod pack.
+
+### Server side — performance mods
+
+Chosen specifically because they attack **memory**, which is this server's
+actual bottleneck, rather than frame rate, which is not the server's problem:
+
+| Mod | Effect |
+|---|---|
+| **FerriteCore** | 40–50% memory reduction. By far the highest-value addition on a RAM-starved host. |
+| **ModernFix** | ~20% less RAM, roughly 2× faster startup. |
+| **Clumps** | Merges XP orbs, cutting entity ticks from grinders. |
+
+**Verify these are not already in the pack before adding them.** Well-built packs
+usually ship FerriteCore and ModernFix already, and installing a second copy
+causes a hard crash at launch, not a warning. Check after first boot with:
+
+```bash
+docker exec minecraft sh -c 'ls /data/mods | grep -iE "ferrite|modernfix|clumps"'
+```
+
+### How to add them, once verified
+
+Additions go through `CF_FORCE_INCLUDE_MODS` in the compose file, never by
+hand-dropping jars into the volume — `AUTO_CURSEFORGE` reconciles `/data/mods`
+against the pack manifest on every start, so a hand-placed jar is deleted the
+next time the pack updates, silently and without an error.
+
+Every client must run a **byte-identical** mod set to the server. Each addition
+means everyone reinstalls. This is the main reason server-side-only additions
+(Paper-style plugins) are attractive — and NeoForge does not offer them, which
+is the trade you accepted by picking a real modpack over crossplay.
 
 ---
 
