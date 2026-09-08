@@ -45,6 +45,13 @@ services:
       # Added 2026-08-08 with the JARVIS tile. The jarvis stack declares its own
       # network key, so the name is jarvis_jarvis, not jarvis_default.
       - jarvis_jarvis
+      # Added 2026-09-09 with the Minecraft tile.
+      # ORDERING TRAP: this network only exists once the minecraft stack has
+      # been started at least once. Running `docker compose up -d` here before
+      # that fails with "network minecraft_default not found" and takes the
+      # DASHBOARD down -- the one place you would look to find out what broke.
+      # Start Stacks/minecraft first, then recreate homarr. Never the reverse.
+      - minecraft_default
 
 volumes:
   homarr_data:
@@ -72,4 +79,6 @@ networks:
   navidrome_default:
     external: true
   jarvis_jarvis:
+    external: true
+  minecraft_default:
     external: true

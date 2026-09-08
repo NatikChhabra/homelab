@@ -1,0 +1,111 @@
+# ============================================================================
+# Minecraft -- Tensura Evolutions (NeoForge, MC 1.21.1)
+#
+# JAVA EDITION ONLY. There is deliberately no Bedrock/Geyser port here.
+# Geyser's own FAQ: "there is no way for Geyser to translate the features that
+# most mods add (blocks, items, etc.), therefore servers that require mods to
+# be installed clientside are unsupportable through Geyser." Tensura Evolutions
+# adds custom blocks, items, mobs, dimensions and skills, so a Bedrock client
+# cannot render this world. Adding 19132 would publish a port that either
+# refuses connections or drops players into a broken world. See README.md.
+# ============================================================================
+services:
+  minecraft:
+    image: itzg/minecraft-server:java21     # MC 1.21.1 requires Java 21
+    container_name: minecraft
+    restart: always
+    stdin_open: true
+    tty: true
+
+    ports:
+      - "25565:25565"                       # Java Edition only
+
+    # HARD memory ceiling, and it is load-bearing rather than tidiness.
+    # This host has 15.4 GB total and the WSL2 VM is capped in .wslconfig. If
+    # Minecraft is allowed to grow unbounded it exhausts the VM and the Linux
+    # OOM killer picks a victim by score -- which would be jarvis-ollama or a
+    # voice container, silently breaking the voice loop. With mem_limit set,
+    # Docker kills MINECRAFT instead and restart:always brings it back. The
+    # blast radius stays inside this stack.
+    #   6G heap + ~512M metaspace (large mod count) + ~512M GC/threads/code
+    #   cache + ~256M direct buffers = ~7.3G. 7680m leaves a little slack.
+    mem_limit: 7680m
+
+    environment:
+      EULA: "TRUE"
+      TZ: Asia/Kolkata
+      UID: "1000"
+      GID: "1000"
+
+      # ---- Modpack ------------------------------------------------------
+      # CF_API_KEY is baked into this image for Java 17+ builds. Do NOT add
+      # one here -- it would be a secret in a tracked file.
+      TYPE: AUTO_CURSEFORGE
+      CF_SLUG: tensura-evolutions-1-21-1
+
+      # PIN THIS AFTER THE FIRST SUCCESSFUL START. Left unset on purpose:
+      # guessing a matcher that does not match makes the container fail at
+      # boot. First run resolves "latest"; read the exact file it chose with
+      #   docker logs minecraft | grep -i "resolved\|Downloading\|serverpack"
+      # then set the matcher to that value and restart. Without a pin, a pack
+      # update lands on the next container recreate and can break the world.
+      # CF_FILENAME_MATCHER: "1.0.69.9"
+
+      # ---- Memory -------------------------------------------------------
+      # 6G is the ceiling this hardware can honestly sustain, NOT the 8-12G
+      # the pack recommends. See README.md "Memory reality" for the arithmetic.
+      MEMORY: 6G
+      USE_AIKAR_FLAGS: "true"
+
+      # ---- Auto-pause ---------------------------------------------------
+      # SIGSTOPs the JVM when nobody is connected. This frees CPU, NOT RAM --
+      # the heap stays resident. It is here because the CPU matters: an idle
+      # modded server still ticks, and those ticks compete with Whisper STT
+      # and Kokoro TTS on the same 8 cores, adding latency to the voice loop.
+      # Paused, Minecraft uses ~0% CPU and JARVIS gets the whole machine.
+      ENABLE_AUTOPAUSE: "true"
+      AUTOPAUSE_TIMEOUT_EST: "1800"         # 30 min after last player leaves
+      AUTOPAUSE_TIMEOUT_INIT: "900"         # 15 min after boot with no joins
+
+      # Required by autopause: a paused process makes one tick appear to last
+      # for the whole pause, and the server watchdog would kill the server on
+      # resume. Independently necessary for a heavy modpack, where chunk gen
+      # legitimately blocks a tick past the default 60s watchdog.
+      MAX_TICK_TIME: "-1"
+
+      # ---- Performance tuning -------------------------------------------
+      # 8/6 rather than the 10/10 default. Simulation distance is the
+      # expensive one -- it drives entity ticking and is roughly quadratic.
+      # Dropping 10 -> 6 is the single largest CPU and RAM saving available
+      # without touching gameplay, and 6 chunks is still well beyond render
+      # range for normal play.
+      VIEW_DISTANCE: "8"
+      SIMULATION_DISTANCE: "6"
+      MAX_PLAYERS: "6"
+
+      # ---- Gameplay -----------------------------------------------------
+      DIFFICULTY: normal
+      MOTD: "Tensura Evolutions"
+      OPS: ""                               # set your Java username, then restart
+
+      # ---- RCON ---------------------------------------------------------
+      # Enabled for the Homarr tile and for graceful in-game shutdown, but
+      # port 25575 is NOT published to the host. Homarr reaches it over the
+      # minecraft_default network by container name. RCON is unauthenticated
+      # beyond this password and grants full console -- it must never be
+      # exposed on a host port.
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: ${RCON_PASSWORD:?set in Stacks/minecraft/.env}
+
+    volumes:
+      # A NAMED VOLUME, not a bind mount from C:, and this is a performance
+      # decision not a style one. Docker Desktop on Windows serves bind mounts
+      # through a filesystem translation layer that is slow for many small
+      # files -- which is exactly a Minecraft world (thousands of region files
+      # plus constant chunk writes). A named volume lives on the VM's native
+      # ext4 VHDX and avoids the translation entirely.
+      - minecraft_data:/data
+
+volumes:
+  minecraft_data:
+    name: minecraft_data

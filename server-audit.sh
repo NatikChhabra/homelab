@@ -1808,6 +1808,94 @@ else
   fail "jarvis/wa/contacts.json is missing - the bridge refuses every send, so messaging is dead"
 fi
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+sec "26. Minecraft server"
+
+_mcdir="/c/ServerData/Stacks/minecraft"
+_mccompose="$_mcdir/docker-compose.yml"
+
+if [ ! -f "$_mccompose" ]; then
+  warn "minecraft/docker-compose.yml is missing - the stack was removed or never restored"
+else
+  # INCIDENT THIS GUARDS (2026-09-09, designed-in rather than observed): this
+  # host has 15.4 GB of RAM and the WSL2 VM is capped. A Minecraft JVM with no
+  # container ceiling grows until the VM is exhausted, and the Linux OOM killer
+  # then picks its victim by score -- which is jarvis-ollama or a voice
+  # container long before it is Minecraft. That kills the voice loop silently
+  # and the only symptom is "JARVIS stopped answering". mem_limit makes Docker
+  # kill Minecraft instead, keeping the blast radius inside this stack.
+  if grep -qE '^\s*mem_limit:' "$_mccompose"; then
+    ok "minecraft has a mem_limit (voice loop is protected from its OOM)"
+  else
+    fail "minecraft/docker-compose.yml has NO mem_limit - an unbounded Minecraft JVM will exhaust the WSL VM and the OOM killer will take a JARVIS container, not Minecraft; restore mem_limit"
+  fi
+
+  # Geyser cannot translate modded blocks/items, so a Bedrock listener on a
+  # Tensura server is a port that either refuses joins or drops players into a
+  # world they cannot render. Publishing it would look like crossplay works.
+  if grep -qE '^\s*-\s*"?19132' "$_mccompose"; then
+    warn "minecraft publishes 19132 (Bedrock) - Geyser cannot translate this modpack's custom content, so that port cannot serve a working game; see minecraft/README.md"
+  else
+    ok "no Bedrock port published (correct for a client-side-mod server)"
+  fi
+
+  # RCON is an unauthenticated-beyond-the-password full server console. It is
+  # reachable by container name on minecraft_default for the Homarr tile and
+  # must never be bound to a host port.
+  if grep -qE '^\s*-\s*"?[0-9.]*:?25575' "$_mccompose"; then
+    fail "minecraft publishes RCON 25575 on the host - that is a full server console on the LAN; keep it internal to minecraft_default"
+  else
+    ok "RCON is not published to the host"
+  fi
+
+  # Deliberately NOT probing tcp/25565. ENABLE_AUTOPAUSE SIGSTOPs the JVM when
+  # idle, and any TCP connect is exactly the knock that wakes it. A weekly
+  # audit probe would resume a 6 GB JVM every Sunday and quietly defeat the
+  # feature. Container state is read from Docker instead.
+  _mcstate=$(docker inspect -f '{{.State.Status}}' minecraft 2>/dev/null)
+  case "$_mcstate" in
+    running) ok "minecraft container is running (autopause not probed by design)" ;;
+    "")      warn "minecraft container does not exist - stack has never been started, or was removed" ;;
+    *)       warn "minecraft container state is '$_mcstate' - expected running" ;;
+  esac
+fi
+
+# INCIDENT THIS GUARDS: game mode stops the media, photo and monitoring stacks
+# to free ~3.9 GB for Minecraft. Forgetting to run `mc-gamemode.ps1 -Off` after
+# playing leaves Sonarr, Radarr and Immich down indefinitely, and nothing else
+# reports it -- downloads simply stop happening. Worse, every port check above
+# fails at once, which reads like the media stack has broken rather than like
+# it was deliberately stopped. This turns that confusing flood into one cause.
+_jarvis_up=$(docker inspect -f '{{.State.Status}}' jarvis-voice 2>/dev/null)
+_sonarr_up=$(docker inspect -f '{{.State.Status}}' sonarr 2>/dev/null)
+if [ "$_jarvis_up" = "running" ] && [ "$_sonarr_up" != "running" ]; then
+  warn "GAME MODE APPEARS TO BE ON: jarvis is up but sonarr is not. If you finished playing Minecraft, run  Stacks\minecraft\mc-gamemode.ps1 -Off  -- until you do, nothing downloads and the *arr failures above are a consequence of this, not separate faults"
+else
+  ok "game mode is off (media stack is not parked)"
+fi
+
+# The world is the only irreplaceable part -- the 600 MB modpack re-downloads
+# from CurseForge, a world does not. minecraft_data is excluded from
+# backup-volumes.sh on purpose (it would put ~15 GB x 14 days on a 180 GB
+# drive), so this is the check that the narrower backup is actually happening.
+_mcbk="/d/Backups/minecraft"
+if [ ! -d "$_mcbk" ]; then
+  if [ "$_mcstate" = "running" ]; then
+    warn "no Minecraft world backup directory at D:\Backups\minecraft - the server is running but its world has never been backed up; run minecraft\mc-backup.sh"
+  else
+    ok "no Minecraft world backup yet (server has not run)"
+  fi
+else
+  _newest=$(find "$_mcbk" -name 'world-*.tgz' -mtime -8 2>/dev/null | head -1)
+  if [ -n "$_newest" ]; then
+    ok "Minecraft world backup is under 8 days old"
+  else
+    warn "no Minecraft world backup newer than 8 days in D:\Backups\minecraft - the world is the one thing that cannot be re-downloaded; check the scheduled job"
+  fi
+fi
+# ---------------------------------------------------------------------------
 _emit ""
 _emit "============================================================"
 # run-job.ps1 scrapes the last line matching SUMMARY for its status text and
