@@ -20,6 +20,21 @@ services:
     ports:
       - "25565:25565"                       # Java Edition only
 
+    # REQUIRED, not decorative -- the same override every *arr service and
+    # Jellyfin carries in this repo. Omitting it here cost a crash loop on
+    # 2026-09-09: the modpack installer failed 9 times with
+    #   java.net.UnknownHostException: Failed to resolve 'api.curseforge.com'
+    #   DnsErrorCauseException: Query failed with SERVFAIL
+    # OOMKilled was false and the exit code was 0, so it looked like a memory
+    # problem and was not one. The ISP resolver SERVFAILs on external API
+    # hostnames; a container without this silently loses the ability to reach
+    # CurseForge, exactly as it silently loses TMDb elsewhere in this stack.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+
     # HARD memory ceiling, and it is load-bearing rather than tidiness.
     # This host has 15.4 GB total and the WSL2 VM is capped in .wslconfig. If
     # Minecraft is allowed to grow unbounded it exhausts the VM and the Linux
@@ -35,7 +50,7 @@ services:
     # protected containers stay resident under game mode, so this is what
     # actually fits today. Raise to 7680m with MEMORY 6G once the VM restarts
     # and picks up the 11GB cap already written into .wslconfig.
-    mem_limit: 5632m
+    mem_limit: 6656m
 
     environment:
       EULA: "TRUE"
@@ -58,7 +73,13 @@ services:
       # a human downloading the zip and placing it in ./modpack/ -- see
       # modpack/PUT-THE-ZIP-HERE.txt.
       #
-      # CF_SLUG: tensura-evolutions-1-21-1     # unusable, see above
+      # BOTH are required, and that is not obvious. CF_MODPACK_ZIP alone fails
+      # with "A modpack page URL or slug identifier is required even with a
+      # provided modpack zip" -- the installer still needs the project identity
+      # to resolve the 313 individual mod files listed in the manifest. The zip
+      # supplies the one file the API refuses to serve; the slug supplies the
+      # identity. Neither works without the other for this pack.
+      CF_SLUG: tensura-evolutions-1-21-1
       CF_MODPACK_ZIP: /modpacks/modpack.zip
 
       # PIN THIS AFTER THE FIRST SUCCESSFUL START. Left unset on purpose:
@@ -70,8 +91,9 @@ services:
       # CF_FILENAME_MATCHER: "1.0.69.9"
 
       # ---- Memory -------------------------------------------------------
-      # 4G, and that is BELOW the pack's 8G minimum -- deliberately, because it
-      # is what fits without restarting the VM and taking the whole server down.
+      # 5G. The manifest declares 313 mods, and 4G GC-thrashes a pack that
+      # size while 6G would leave only ~1.26 GB of VM headroom. Still below the
+      # pack's 8G recommendation -- that needs more physical RAM, not tuning.
       #
       # MEASURED 2026-09-09 with game mode on INCLUDING the jarvis stack: VM
       # MemAvailable 8.70 GB, of which 5.34 GB was MemFree -- memory the VM
@@ -80,7 +102,7 @@ services:
       # free pool and force the VM to claim ~2 GB more from a host that had
       # 1.65 GB available: paging, and therefore voice-loop latency. That is
       # the whole reason this is 4G. See README.md "Memory reality".
-      MEMORY: 4G
+      MEMORY: 5G
       USE_AIKAR_FLAGS: "true"
 
       # ---- Auto-pause ---------------------------------------------------
