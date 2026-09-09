@@ -1869,12 +1869,62 @@ else
   # idle, and any TCP connect is exactly the knock that wakes it. A weekly
   # audit probe would resume a 6 GB JVM every Sunday and quietly defeat the
   # feature. Container state is read from Docker instead.
+  # STOPPED IS THE NORMAL STATE and must not warn. Minecraft is opt-in on this
+  # host: it holds ~5.4 GB of 15.4 GB, so it runs only while someone is playing.
+  # An earlier version of this check warned on anything but "running", which
+  # would have trained everyone to ignore a warning that fires every single day.
+  # A check that cries wolf is worse than no check.
   _mcstate=$(docker inspect -f '{{.State.Status}}' minecraft 2>/dev/null)
   case "$_mcstate" in
-    running) ok "minecraft container is running (autopause not probed by design)" ;;
-    "")      warn "minecraft container does not exist - stack has never been started, or was removed" ;;
-    *)       warn "minecraft container state is '$_mcstate' - expected running" ;;
+    running)          ok "minecraft is running (autopause not probed by design)" ;;
+    exited|created)   ok "minecraft is stopped - the normal idle state on this host" ;;
+    "")               warn "minecraft container does not exist - stack was removed or never created" ;;
+    *)                warn "minecraft container state is '$_mcstate' - expected running, exited or created" ;;
   esac
+fi
+
+# INCIDENT THIS GUARDS (2026-09-09): the leading indicator nobody was watching.
+# Minecraft (~5.4 GB) came back automatically under restart:always while nobody
+# was playing, and the WSL VM ran out of swap -- SwapFree fell to 880 kB of
+# 3.1 GB. AdGuard did not stop and did not crash (restarts=0, status=running),
+# but it was starved badly enough that its upstream DoH queries timed out and
+# DNS FOR THE WHOLE HOUSE went down. Every container looked healthy. Section 17
+# catches DNS once it has already failed; this catches the condition that
+# causes it, while there is still time to act.
+_vmstat=$(docker run --rm valkey/valkey:9 sh -c 'grep -E "^(MemAvailable|SwapTotal|SwapFree)" /proc/meminfo' 2>/dev/null)
+if [ -n "$_vmstat" ]; then
+  _memavail=$(printf '%s' "$_vmstat" | awk '/MemAvailable/{print int($2/1024)}')
+  _swaptot=$(printf '%s' "$_vmstat"  | awk '/SwapTotal/{print int($2/1024)}')
+  _swapfree=$(printf '%s' "$_vmstat" | awk '/SwapFree/{print int($2/1024)}')
+  _swappct=100
+  [ "${_swaptot:-0}" -gt 0 ] && _swappct=$(( _swapfree * 100 / _swaptot ))
+
+  if [ "${_memavail:-0}" -lt 700 ]; then
+    fail "WSL VM has only ${_memavail} MB available - the box is thrashing; AdGuard stays 'running' while its upstream DNS times out, which takes the whole house offline. Stop Minecraft (docker compose --project-directory /c/ServerData/Stacks/minecraft stop) or park stacks with mc-gamemode.ps1 -On"
+  elif [ "${_memavail:-0}" -lt 1500 ]; then
+    warn "WSL VM available memory is ${_memavail} MB - tight; anything heavy started now will push it into swap"
+  else
+    ok "WSL VM available memory is ${_memavail} MB"
+  fi
+
+  if [ "${_swappct:-100}" -lt 15 ]; then
+    fail "WSL VM swap is ${_swappct}% free (${_swapfree}/${_swaptot} MB) - swap exhaustion is what preceded the 2026-09-09 DNS outage; something is oversized for this host"
+  elif [ "${_swappct:-100}" -lt 40 ]; then
+    warn "WSL VM swap is only ${_swappct}% free (${_swapfree}/${_swaptot} MB) - memory pressure is building"
+  else
+    ok "WSL VM swap is ${_swappct}% free"
+  fi
+fi
+
+# Minecraft must NOT be on restart:always. At ~5.4 GB on a 15.4 GB host it
+# would resurrect itself on every engine restart, including when nobody is
+# playing -- which is exactly how the box reached swap exhaustion.
+if [ -f "$_mccompose" ]; then
+  if grep -qE '^\s*restart:\s*unless-stopped' "$_mccompose"; then
+    ok "minecraft uses restart: unless-stopped (cannot resurrect itself when stopped)"
+  else
+    fail "minecraft is not on restart: unless-stopped - with restart:always it restarts itself on every engine restart and starves AdGuard into a house-wide DNS outage"
+  fi
 fi
 
 # INCIDENT THIS GUARDS: game mode stops the media, photo and monitoring stacks
