@@ -70,5 +70,44 @@ def main():
     return 0
 
 
+def prune(max_age_hours=24):
+    """Delete screenshots older than max_age_hours.
+
+    WHY THIS EXISTS: this script wrote a PNG every 30 seconds and never deleted
+    one. By 2026-09-09 that was 40,266 files and 3.7 GB -- 95% of the entire
+    Stacks directory -- on the C: SSD that also holds every app database, at
+    85% full. Nothing ever reads an old screenshot: the HUD serves only the
+    newest via /api/hud/screen, so every file older than the last one is dead
+    weight the moment it is written.
+
+    Pruning here rather than in a separate scheduled job on purpose -- a
+    cleanup task that has to be registered separately is a cleanup task that
+    silently stops running.
+    """
+    cutoff = time.time() - max_age_hours * 3600
+    removed = freed = 0
+    try:
+        for name in os.listdir(OUTPUT_DIR):
+            if not name.endswith(".png"):
+                continue
+            fp = os.path.join(OUTPUT_DIR, name)
+            try:
+                st = os.stat(fp)
+                if st.st_mtime < cutoff:
+                    freed += st.st_size
+                    os.remove(fp)
+                    removed += 1
+            except OSError:
+                # A file vanishing mid-prune is normal, not an error.
+                continue
+    except OSError as e:
+        print(f"prune skipped: {e}")
+        return
+    if removed:
+        print(f"Pruned {removed} screenshot(s), freed {freed // 1048576} MB")
+
+
 if __name__ == "__main__":
-    exit(main())
+    rc = main()
+    prune()
+    exit(rc)
