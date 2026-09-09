@@ -1,170 +1,213 @@
 # Minecraft — Tensura Evolutions (NeoForge 1.21.1)
 
-**Status: built and validated, NOT started.** Starting it needs one decision
-from Natik first — see [Before first start](#before-first-start).
+**Status: working. Deliberately stopped when not in use.**
+
+Tensura Evolutions **1.0.69.9** · MC **1.21.1** · NeoForge **21.1.249** ·
+**253** server mods installed from 313 declared (23 excluded as client-only).
+Verified up with `rcon-cli list` and `mc-monitor`, not just a log line.
 
 ---
 
-## Read this first: two things do not work the way you asked
+## Read this first
 
-### 1. Bedrock crossplay is not possible with this modpack
+### Minecraft is opt-in on this host. Start it, play, stop it.
 
-You asked for Java + Bedrock and said "idk if mods will be able to do that."
-They cannot. This is not a tuning problem, and no configuration fixes it.
+```powershell
+cd C:\ServerData\Stacks\minecraft
+.\mc-gamemode.ps1 -On           # park ~3.9 GB of optional stacks
+docker compose up -d            # start the server (~1-2 min after first boot)
 
-Geyser — the only Java/Bedrock bridge — states it plainly in its own FAQ:
+# ... play ...
+
+docker compose stop             # STOP IT when you finish
+.\mc-gamemode.ps1 -Off          # bring your services back
+```
+
+Add `-IncludeJarvis` to `-On`/`-Off` to also park the JARVIS stack (~2.75 GB,
+mostly `jarvis-ollama`). That **breaks the voice loop** until `-Off`, so it is
+opt-in and never part of a plain `-On`.
+
+### Why it must be stopped — this took the house offline once
+
+**Incident, 2026-09-09.** Minecraft holds ~5.4 GB on a 15.4 GB host and
+originally carried `restart: always`, so it resurrected itself on every Docker
+engine restart — including with nobody playing. The WSL VM reached
+**SwapFree 880 kB of 3.1 GB**. Two ordinary `docker` commands timed out at 120 s.
+
+AdGuard **never stopped and never crashed** — `status=running`, `restarts=0`,
+game mode protects it unconditionally. But it was starved badly enough that its
+upstream DoH queries timed out:
+
+```
+dnsproxy: requesting https://family.adguard-dns.com/dns-query:
+  Client.Timeout exceeded while awaiting headers
+```
+
+So **DNS for the entire house went down while every container looked healthy.**
+
+Two changes came out of that, and neither should be undone:
+
+1. **`restart: unless-stopped`**, a deliberate exception to this repo's
+   `restart: always` convention. A manual stop now survives engine restarts and
+   reboots. Minecraft cannot resurrect itself. It still restarts if it crashes
+   while genuinely running.
+2. **Audit checks for the leading indicator.** Section 17 already catches DNS
+   *after* it fails; section 26 now warns on VM available memory (<1500 MB) and
+   swap headroom (<40% free), and fails below 700 MB / 15%. That is the
+   condition that causes the outage, caught while there is still time.
+
+### It cannot run alongside everything else — measured, not estimated
+
+| State | VM MemAvailable | Swap free | Result |
+|---|---|---|---|
+| All 34 containers + Minecraft | **857 MB** | **880 kB / 3.1 GB** | thrashing, 3 restarts, DNS down |
+| Optional stacks parked + Minecraft | 2.1 GB | recovering | Minecraft + JARVIS both healthy |
+| Minecraft stopped | 5.6 GB | 1.0 GB | comfortable |
+
+Host is **15.4 GB, 2×8 GB, both SODIMM slots full**, board maxes at 32 GB. The
+WSL VM is capped at 10 GB. Heap is **5G** with `mem_limit: 6656m`; peak during
+mod loading was 96% of that limit with no OOM. The pack asks for 8–12 GB — this
+box cannot give that, and no amount of tuning changes it.
+
+**The real fix is RAM.** 2×16 GB DDR4-3200 is roughly ₹5,000–7,000 and removes
+every compromise here: game mode becomes optional, the heap goes to 8–10 GB, and
+nothing has to be parked to play.
+
+> `.wslconfig` is already set to `memory=11GB` but has **never applied** —
+> `MemTotal` is still 10 GB. It needs a true `wsl --shutdown`, which takes the
+> whole server down and has not been authorised.
+
+---
+
+## Connecting
+
+**Java Edition only**, `<server-tailscale-ip>:25565`, with the Tensura
+Evolutions pack installed in your launcher. Tailscale only — do **not** forward
+25565 to the public internet.
+
+### Bedrock cannot join this pack
+
+Geyser is the only Java↔Bedrock bridge, and its own FAQ is explicit:
 
 > there is no way for Geyser to translate the features that most mods add
 > (blocks, items, etc.), therefore servers that require mods to be installed
 > clientside are unsupportable through Geyser.
 
-Tensura Evolutions is built entirely out of custom blocks, items, mobs,
-dimensions and skills. A Bedrock client has no way to receive or render any of
-it. Geyser *does* officially support NeoForge as a platform — that part of the
-idea was right — but the platform working and the *content* translating are
-different things, and only the first is true.
+[Rainbow](https://github.com/GeyserMC/rainbow), Geyser's official custom-content
+converter, does not rescue it either: it is **Fabric-only** (this is NeoForge)
+and converts *appearance*, not behaviour. Tensura is its mechanics — skills,
+evolution, quests — and a Bedrock client has no code to run any of it.
 
-So this stack is **Java Edition only**, and port 19132 is deliberately absent.
-Publishing it would create a port that either refuses joins or drops players
-into a world of invisible blocks, which is worse than not offering it at all.
+Port 19132 is therefore deliberately absent. **If Bedrock players matter more
+than this pack**, the answer is a separate Paper + Geyser + Floodgate server:
+real crossplay, no client installs, different world. It will not fit alongside
+this one without more RAM.
 
-**If Bedrock players matter more than this modpack**, the answer is a second,
-separate Paper server with Geyser + Floodgate — vanilla-compatible, everyone
-joins, no client installs. It cannot run at the same time as this one on this
-hardware (see below). Say so and it gets built instead.
+---
 
-### 2. The pack wants 8-12 GB. This machine can honestly give 6 GB.
+## Client-side mods (your PC, not the server)
 
-You said "give as much as it needs, idc." The amount it needs is not available.
-Better to say that now than to set 8G quietly and let it surface as stutter.
+### Graphics — Iris and Sodium are already in the pack
 
-| | |
+**Do not install them by hand.** They appear in the server's client-only
+exclusion list, which means they ship inside the client zip and install with the
+pack. A second copy is a hard crash at launch, not a warning.
+
+You already have the shader engine. What is missing is a **shader pack** — drop
+one in `shaderpacks/` and select it under Video Settings → Shaders:
+
+| Pack | Why |
 |---|---|
-| Host RAM | **15.4 GB** (2x8 GB, **both slots full**, board maxes at 32 GB) |
-| Available at time of build | **776 MB** |
-| WSL2 VM cap (`.wslconfig`) | 10 GB |
-| Containers already inside it | ~7.0 GB across 33 containers |
-| VM swap in use | **2923 / 3072 MB — thrashing before Minecraft exists** |
-| Tensura Evolutions asks for | 8 GB minimum, 12 GB recommended |
+| **Complementary Reimagined** *(recommended)* | Best-optimised of the good-looking packs, scalable presets — start on Medium. |
+| **BSL Shaders** | Prettier water and skies, slightly heavier. |
 
-The arithmetic does not close. Even with game mode stopping everything
-non-essential (~3.9 GB reclaimed, measured):
+Avoid SEUS PTGI / Rethinking Voxels — path-traced and unplayable next to 313 mods.
 
-```
-  remaining containers (JARVIS + AdGuard + Homarr + Vaultwarden)   ~3.3 GB
-  Minecraft at 6 GB heap + ~1.3 GB JVM overhead                    ~7.3 GB
-  WSL VM kernel and cache                                          ~0.5 GB
-                                                                  --------
-  WSL VM total                                                    ~11.1 GB
-  Windows itself                                                   ~3.0 GB
-                                                                  --------
-  TOTAL                                                           ~14.1 GB  of 15.4 GB
-```
+### Controller / gamepad
 
-That leaves ~1.3 GB of margin and **requires Edge closed while playing** (it was
-holding 2.6 GB during the build). At an 8 GB heap the total exceeds physical RAM
-and the machine pages to disk, which on a modded server means multi-second
-freezes — worse than the smaller heap.
+The pack ships *Controlling*, which is a **keybind-search screen** and has
+nothing to do with controllers — an easy name to misread.
 
-**The real fix is RAM.** Both SODIMM slots hold 8 GB DDR4-3200 and the board
-supports 32 GB. Replacing them with 2x16 GB is roughly Rs 5,000-7,000 and makes
-every compromise here disappear: game mode becomes optional, the heap goes to
-10 GB, and JARVIS stops competing. It is the highest-value change available and
-it is a purchase, not a configuration.
+For an actual gamepad, add
+**[Controllable](https://www.curseforge.com/minecraft/mc-mods/controllable)** by
+MrCrayfish, **0.25.4 for NeoForge 1.21.1**: analog 360° movement, remappable
+buttons, adjustable sensitivity, radial menu. Xbox, PlayStation and generic pads.
 
----
+**Client-side only** — drop the jar in your instance's `mods/`. It does not go
+on the server and nobody else needs it. Client-only input mods are the one
+category that does *not* have to match the server's mod set.
 
-## Before first start
+### Server-side performance mods (optional)
 
-Two things, in this order.
-
-**1. The WSL VM cap must go from 10 GB to ~11.5 GB**, or Minecraft cannot fit.
-`.wslconfig` is read only when the VM starts, so this needs a `wsl --shutdown`
-— which **stops every container**, including AdGuard (DNS for the whole
-tailnet) and the JARVIS voice loop. That is a RED action under
-`Stacks/CLAUDE.md` section 11 and is **not** being done unattended. Pick a
-window.
-
-Note `.wslconfig` already carries a pending unapplied change:
-`autoMemoryReclaim=gradual`, added 2026-07-28, has never taken effect for
-exactly this reason. The same restart applies both.
-
-**2. Then, in this order** — the order matters, see the ordering trap below:
-
-```powershell
-cd C:\ServerData\Stacks\minecraft
-.\mc-gamemode.ps1 -On          # free ~3.9 GB first
-docker compose up -d           # first boot pulls ~600 MB, takes 5-15 min
-docker logs -f minecraft       # wait for: Done (...)! For help, type "help"
-```
-
-First boot downloads the modpack from CurseForge and generates the world. It is
-slow, and that is normal. Later starts are fast.
-
----
-
-## Pin the pack version after the first successful boot
-
-`CF_FILENAME_MATCHER` is deliberately left commented out. A matcher that does
-not match makes the container fail at boot, so guessing one is worse than
-leaving it unset. First boot resolves "latest"; find what it actually chose:
+Chosen because they attack **memory**, this server's actual bottleneck:
+**FerriteCore** (40–50% memory reduction), **ModernFix** (~20% less RAM),
+**Clumps** (fewer entity ticks). Check they are not already present first — a
+duplicate jar is a hard crash:
 
 ```bash
-docker logs minecraft | grep -iE "resolved|downloading|serverpack"
+docker exec minecraft sh -c 'ls /data/mods | grep -iE "ferrite|modernfix|clumps"'
 ```
 
-Put that exact value into `CF_FILENAME_MATCHER` and `docker compose up -d`.
-Until then, a pack update can land on the next container recreate and change the
-mod set under an existing world.
+Add them via `CF_FORCE_INCLUDE_MODS`, never by hand-dropping jars —
+`AUTO_CURSEFORGE` reconciles `/data/mods` against the manifest on every start
+and would silently delete them.
 
 ---
 
-## Everyday use
+## Admin
 
-```powershell
-.\mc-gamemode.ps1 -Status      # what is running + live memory picture
-.\mc-gamemode.ps1 -On          # before playing  (stops ~3.9 GB of stacks)
-.\mc-gamemode.ps1 -Off         # AFTER playing   (brings them all back)
+```bash
+docker exec minecraft rcon-cli list             # who is online
+docker exec minecraft rcon-cli op <YourName>    # grant yourself operator
+docker exec minecraft rcon-cli save-all         # force a save
 ```
 
-**Forgetting `-Off` is the failure this setup is most likely to hit.** Sonarr,
-Radarr and Immich stay down, nothing downloads, and nothing says so. Audit
-section 26 detects it and reports it as one cause rather than letting it appear
-as ten unrelated port failures.
-
-The script refuses to touch `jarvis`, `adguard`, `homarr`, `vaultwarden` or
-`minecraft` even if its own list is edited carelessly later.
+`OPS` is empty in the compose file — set it to your Minecraft username and
+restart, or use `rcon-cli op` above. RCON port 25575 is deliberately **not**
+published; these reach it from inside the container.
 
 ### Backups
 
 ```bash
-bash mc-backup.sh              # world only -> D:\Backups\minecraft, 7-day retention
+bash mc-backup.sh    # world only -> D:\Backups\minecraft, 7-day retention
 ```
 
-`minecraft_data` is **excluded** from the nightly `backup-volumes.sh`: it is
-~15 GB, mostly a re-downloadable modpack, and at 14-day retention would put
-~210 GB onto a 180 GB drive. The world — the only irreplaceable part — is backed
-up by this script instead. It flushes through RCON first and re-enables saving
-even if the tar fails.
+Scheduled daily 03:30 as `ServerData - Minecraft World Backup` via
+`run-job.ps1 -Job mc-backup`, inheriting its locking, transcripts, rotation and
+failure reporting. Proven end-to-end against the live server: RCON flush,
+saving paused, tar, saving re-enabled, archive verified readable.
 
-**Scheduled and verified.** `ServerData - Minecraft World Backup` runs daily at
-03:30 via the existing `run-job.ps1` wrapper (`-Job mc-backup`), so it inherits
-that wrapper's locking, transcript logging, log rotation and failure reporting
-rather than reinventing them. 03:30 was chosen to avoid the 04:00 / 04:30 /
-05:00 / 05:30 slots the other jobs already hold.
+`minecraft_data` is **excluded** from the nightly `backup-volumes.sh` — ~15 GB of
+mostly re-downloadable modpack × 14 days would not fit on a 180 GB drive. Only
+the world, the irreplaceable part, is retained here.
 
-Its status file reports `heartbeatConfigured: false`, and that is **accurate,
-not a fault**: no Uptime Kuma push token exists for this job yet. The gap is
-covered by audit section 26, which fails when no world archive is newer than
-8 days — so a silently dead backup surfaces weekly rather than never. Create
-`KUMA_PUSH_MC_BACKUP` and set it in `run-job.ps1` if you want same-day notice.
+The status file reports `heartbeatConfigured: false`, which is **accurate**: no
+Uptime Kuma token exists for this job. Audit section 26 covers the gap by
+failing when no archive is newer than 8 days.
 
-### Do not add an Uptime Kuma monitor for port 25565
+---
 
-Same trap as the Homarr tile, but worse: Kuma polls every 60 s by default, and
-every poll is a TCP connect that wakes an autopaused server. A Kuma monitor
-would keep the JVM permanently awake. If you want Kuma coverage, monitor the
-*container* rather than the port.
+## Homarr tile
+
+A **Gaming** section on the dashboard holds a native `minecraftServerStatus`
+widget (`minecraft:25565`), a Portainer shortcut for container control, and a
+command notebook.
+
+**Set the widget refresh to 10 minutes.** Not a preference: every status ping is
+a TCP connect, and a TCP connect *wakes an auto-paused server* — itzg's
+autopause cannot tell a ping from a login. At the default rate the server never
+pauses. At 10 minutes it wakes, waits 120 s, and re-pauses.
+
+For the same reason, **never add an Uptime Kuma monitor on 25565** — it polls
+every 60 s and would pin the JVM permanently awake. Monitor the container instead.
+
+Use the **container name**, not the Tailscale address: Homarr runs status checks
+server-side from inside its own container, which is why it joins every stack
+network.
+
+> Tiles live in Homarr's SQLite DB, not in git. Homarr runs as **root** — never
+> chown its `db.sqlite` to 1000. Back up `homarr_data` before touching it; a
+> copy is in `homarr/db-backups/`.
 
 ---
 
@@ -172,73 +215,14 @@ would keep the JVM permanently awake. If you want Kuma coverage, monitor the
 
 | Choice | Why |
 |---|---|
-| **Named volume, not a bind mount from C:** | Docker Desktop on Windows serves bind mounts through a filesystem translation layer that is slow for many small files — precisely a Minecraft world. A named volume sits on the VM native ext4 and skips it. |
-| **`mem_limit: 7680m`** | Load-bearing. Without a ceiling, an unbounded JVM exhausts the VM and the Linux OOM killer picks its victim by score — which is `jarvis-ollama` or a voice container long before it is Minecraft. With it, Docker kills Minecraft and `restart: always` brings it back. The voice loop is never the casualty. |
-| **`ENABLE_AUTOPAUSE`** | SIGSTOPs the JVM when nobody is connected. Frees **CPU, not RAM** — the heap stays resident. It is here because an idle modded server still ticks, and those ticks compete with Whisper STT and Kokoro TTS for the same 8 cores. |
-| **`MAX_TICK_TIME: -1`** | Required by autopause: a resumed process looks like one enormous tick and the watchdog would kill the server. Independently needed for a heavy pack, where chunk generation legitimately blocks past the 60 s default. |
-| **`SIMULATION_DISTANCE: 6`** (default 10) | The largest CPU and RAM saving available without touching gameplay. It drives entity ticking and scales roughly quadratically. 6 is still beyond normal render range. |
-| **`VIEW_DISTANCE: 8`** (default 10) | Same reasoning, smaller effect. |
-| **`USE_AIKAR_FLAGS`** | Well-established G1GC tuning for Minecraft. Reduces GC pause spikes, which matter more here than raw throughput. |
-| **RCON on, port not published** | RCON is a full server console. Homarr reaches it by container name over `minecraft_default`. It must never be bound to a host port. |
-| **World on C: (SSD), backups on D: (HDD)** | D: is a 5400 rpm drive shared with the media library and live torrents; a world there would contend with qBittorrent for head time and stutter on save. C: has 66 GB free, which is ample. |
-
----
-
-## Homarr tile
-
-**Ordering trap:** `minecraft_default` does not exist until the Minecraft stack
-has been started once. Running `docker compose up -d` in `Stacks/homarr` before
-that fails with *"network minecraft_default not found"* and takes the dashboard
-down — the one place you would look to find out what broke. The compose file
-carries the same warning.
-
-After Minecraft is up:
-
-```powershell
-cd C:\ServerData\Stacks\homarr
-docker compose up -d
-```
-
-### What to add at `:7575`
-
-Three tiles. Together they cover status, control and console, and they add
-**zero** new containers — which matters, because RAM is the constraint.
-
-**1. Minecraft server status widget** — online/offline, player count, MOTD.
-
-- **Server address:** `minecraft:25565` — the container name, *not* the
-  Tailscale address. Homarr runs status checks server-side from inside its own
-  container, which is why it joins every stack network. Same reasoning as every
-  existing tile. Pointed at the Tailscale IP it shows red while the server is
-  perfectly healthy.
-- **Refresh interval: set this to 10 minutes. Not the default.** This is not a
-  preference. Every status ping is a TCP connect, and a TCP connect *wakes an
-  autopaused server* — itzg's autopause cannot tell a ping from a login. At the
-  default poll rate the server never pauses at all and the feature is dead
-  config. At 10 minutes it wakes, waits 120 s, and re-pauses: paused ~8 minutes
-  in every 10, and the tile still works.
-
-**2. A link tile to Portainer** (`:9443`) for start / stop / restart / logs.
-
-Homarr **cannot** do this itself — it has no Docker socket mounted, and it is
-not getting one. Portainer already holds
-`/run/host-services/docker.proxy.sock` and already does the job. Mounting the
-socket into a second web-facing container would duplicate an existing
-capability while doubling the blast radius of anything that reaches it: the
-Docker socket is root-equivalent on the host.
-
-**3. A bookmark tile for the console one-liner** (Homarr cannot run commands):
-
-```bash
-docker exec minecraft rcon-cli <command>
-# e.g.  rcon-cli list          - who is online
-#       rcon-cli op Natik      - grant yourself operator
-#       rcon-cli save-all      - force a save before a backup
-```
-
-RCON port 25575 is deliberately unpublished; this reaches it from inside the
-container, so nothing is exposed. Note that `docker exec` also wakes a paused
-server, for the same reason as the status ping.
+| **`dns: 1.1.1.1 / 8.8.8.8`** | Required, not decorative. Without it the installer failed 9× with `UnknownHostException: api.curseforge.com` / SERVFAIL, while `OOMKilled=false` and exit code 0 — it reads as a memory fault and is not one. Same defect that silently kills TMDb lookups elsewhere in this repo. |
+| **`CF_SLUG` *and* `CF_MODPACK_ZIP`** | Both required. The zip alone errors with *"A modpack page URL or slug identifier is required even with a provided modpack zip"*. The pack authors set CurseForge's third-party-distribution flag to **not allowed**, so the API will never serve it — a human downloads it once to `modpack/modpack.zip`, which is also the version pin. |
+| **`restart: unless-stopped`** | See the incident above. At 5.4 GB on this host, `always` is how DNS died. |
+| **`mem_limit: 6656m`** | Load-bearing. Without a ceiling the JVM exhausts the VM and the OOM killer scores `jarvis-ollama` before Minecraft. With it, Docker kills Minecraft and the blast radius stays in this stack. |
+| **Named volume, not a bind mount** | Docker Desktop serves Windows bind mounts through a slow translation layer — exactly wrong for a world's thousands of small region files. |
+| **`ENABLE_AUTOPAUSE`** | Frees **CPU, not RAM**. Measured: host CPU averaged 21.9% across 16 logical processors, so CPU was never the scarce resource. Kept for the marginal win; do not trade anything valuable for it. |
+| **`SIMULATION_DISTANCE: 6`** (default 10) | Largest CPU/RAM saving available without touching gameplay; drives entity ticking and scales roughly quadratically. |
+| **World on C: (SSD), backups on D: (HDD)** | D: is a 5400 rpm drive shared with the media library and live torrents; a world there would contend with qBittorrent and stutter on save. |
 
 ---
 
@@ -248,92 +232,21 @@ server, for the same reason as the status ping.
 |---|---|---|
 | 25565 | Java Edition | yes |
 | 25575 | RCON | **no** — internal to `minecraft_default` only |
-| 19132 | Bedrock | **no** — cannot work with this modpack, see above |
+| 19132 | Bedrock | **no** — cannot work with this pack |
 
-No collision with the allocation listed in `Stacks/CLAUDE.md`.
-
-**Tailscale only.** Do not forward 25565 to the public internet. Friends join
-over the tailnet, like everything else here.
-
----
-
-## Graphics and extra mods (phase 2, not installed)
-
-### First, the thing that trips everyone up
-
-**Tensura Evolutions is already a modpack** — hundreds of curated mods. Most of
-what feels "missing" is already inside it. Bolting extra gameplay mods onto a
-curated quest/progression pack is the standard way to break the quest book,
-the balance, or both. So: performance and visuals only, and leave the pack's
-own progression alone.
-
-**Shaders and rendering mods are 100% client-side.** Nothing about graphics goes
-on this server. The server has no GPU involvement whatsoever — it does not
-render a single frame. All of the below goes into *your launcher profile on your
-main PC*, and only the server-side section touches this box.
-
-### Client side — graphics (your PC, your launcher)
-
-For NeoForge 1.21.1 the stack is **Sodium (NeoForge build) + Iris**.
-
-Not Embeddium, and not Oculus. Those are the legacy path for 1.20.1 and older,
-where native Iris did not exist yet. On 1.21.1 Iris supports NeoForge directly
-and wants the official NeoForge build of Sodium. Installing the Embeddium/Oculus
-pair here is the most common way to end up with a broken launcher on this
-version.
-
-Shader pack, at the "average, not crushing" weight you asked for:
-
-| Pack | Why |
-|---|---|
-| **Complementary Reimagined** *(recommendation)* | The best-optimised of the good-looking packs, and it ships scalable presets — start on Medium. Looks substantially better than vanilla without the frame cost of the heavy packs. |
-| **BSL Shaders** | Equally popular, slightly prettier water and skies, slightly heavier. Fine alternative if you prefer the look. |
-
-Avoid the ray-traced / path-traced packs (SEUS PTGI, Rethinking Voxels) — they
-are far past "average" and would be unplayable alongside a 400-mod pack.
-
-### Server side — performance mods
-
-Chosen specifically because they attack **memory**, which is this server's
-actual bottleneck, rather than frame rate, which is not the server's problem:
-
-| Mod | Effect |
-|---|---|
-| **FerriteCore** | 40–50% memory reduction. By far the highest-value addition on a RAM-starved host. |
-| **ModernFix** | ~20% less RAM, roughly 2× faster startup. |
-| **Clumps** | Merges XP orbs, cutting entity ticks from grinders. |
-
-**Verify these are not already in the pack before adding them.** Well-built packs
-usually ship FerriteCore and ModernFix already, and installing a second copy
-causes a hard crash at launch, not a warning. Check after first boot with:
-
-```bash
-docker exec minecraft sh -c 'ls /data/mods | grep -iE "ferrite|modernfix|clumps"'
-```
-
-### How to add them, once verified
-
-Additions go through `CF_FORCE_INCLUDE_MODS` in the compose file, never by
-hand-dropping jars into the volume — `AUTO_CURSEFORGE` reconciles `/data/mods`
-against the pack manifest on every start, so a hand-placed jar is deleted the
-next time the pack updates, silently and without an error.
-
-Every client must run a **byte-identical** mod set to the server. Each addition
-means everyone reinstalls. This is the main reason server-side-only additions
-(Paper-style plugins) are attractive — and NeoForge does not offer them, which
-is the trade you accepted by picking a real modpack over crossplay.
+**Ordering trap:** `minecraft_default` only exists once this stack has started
+once. Running `docker compose up -d` in `Stacks/homarr` before that fails with
+*"network minecraft_default not found"* and takes the dashboard down.
 
 ---
 
 ## Rollback
 
-Nothing has been started, so rollback is deletion:
-
 ```powershell
-docker compose down                      # only if it was ever started
+docker compose down
 docker volume rm minecraft_data          # destroys the world - be sure
-Remove-Item -Recurse C:\ServerData\Stacks\minecraft
 ```
 
-Then restore the three edited files from their `.bak.20260908T195927Z` copies:
-`backup-volumes.sh`, `homarr/docker-compose.yml`, `server-audit.sh`.
+World archives are in `D:\Backups\minecraft\`. Restore with the command in the
+header of `mc-backup.sh`. Edited files have `.bak.<UTC-timestamp>` copies
+alongside them.

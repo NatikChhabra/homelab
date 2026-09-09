@@ -3,7 +3,21 @@ services:
   ollama:
     image: ollama/ollama@sha256:b88c73ace3e115f8ec53dc8761ae1c0aabfa675406e3681786b98757ce050f42
     container_name: jarvis-ollama
-    restart: always
+    # TURNED OFF 2026-09-09 at Natik's request, to free memory on a 15.4 GB host.
+    #
+    # restart: "no", NOT always. `docker update --restart=no` only affects the
+    # RUNNING container -- the next `docker compose up -d` would put the policy
+    # straight back and start it again. This file is the only place the change
+    # actually persists.
+    #
+    # WHAT THIS COSTS: Hermes LLM answers stop. Wake word, speech-to-text,
+    # speech-out and the local intent path all keep working -- roughly 18 of 25
+    # commands run with no model at all, so lights, fan and AC still respond.
+    # This degrades JARVIS, it does not take it out.
+    #
+    # TO TURN IT BACK ON:
+    #   docker compose --project-directory /c/ServerData/Stacks/jarvis up -d ollama
+    restart: "no"
     ports:
       - "11434:11434"
     environment:
