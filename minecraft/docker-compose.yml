@@ -98,6 +98,19 @@ services:
       CF_SLUG: tensura-evolutions-1-21-1
       CF_MODPACK_ZIP: /modpacks/modpack.zip
 
+      # AutoModpack: syncs the server's mod set to a client when it joins, so
+      # friends do not hand-install 253 jars. Java Minecraft cannot download
+      # mods on join by itself -- this is the closest thing that exists, and it
+      # still needs a ONE-TIME client install of NeoForge + this same jar.
+      # After that, every future mod change syncs automatically.
+      #
+      # Added via MODS, NOT by dropping a jar into the volume. AUTO_CURSEFORGE
+      # reconciles /data/mods against the modpack manifest on every start, so a
+      # hand-placed jar is silently deleted the next time the pack is touched.
+      # MODS entries survive that. Do NOT set REMOVE_OLD_MODS -- it wipes the
+      # whole mods directory before unpacking and would take this with it.
+      MODS: /mods-extra/automodpack-mc1.21.1-neoforge-4.0.6.jar
+
       # NO CF_FILENAME_MATCHER NEEDED. It would pin which file the API resolves,
       # but the API is not being used to fetch the pack -- ./modpack/modpack.zip
       # IS the pin, and it cannot change unless someone replaces the file. The
@@ -165,7 +178,10 @@ services:
       # ---- Gameplay -----------------------------------------------------
       DIFFICULTY: normal
       MOTD: "Tensura Evolutions"
-      OPS: ""                               # set your Java username, then restart
+      # Natik. Resolved to a UUID against the Mojang API on first start,
+      # which needs working DNS -- see the dns: override above. With
+      # online-mode=true this must match the Mojang account exactly.
+      OPS: Impackttrash
 
       # ---- RCON ---------------------------------------------------------
       # Enabled for the Homarr tile and for graceful in-game shutdown, but
@@ -190,6 +206,9 @@ services:
       # into it from Explorer. :ro so the server can never modify or delete the
       # one copy of a file that cannot be re-downloaded automatically.
       - ./modpack:/modpacks:ro
+      # Extra mods added outside the CurseForge manifest. Read-only so the
+      # server can never modify or delete them.
+      - ./mods-extra:/mods-extra:ro
 
 volumes:
   minecraft_data:
