@@ -15,7 +15,14 @@
 #   MSYS_NO_PATHCONV=1 docker run --rm -v minecraft_data:/data \
 #     -v /d/Backups/minecraft:/backup valkey/valkey:9 \
 #     tar -xzf /backup/world-<stamp>.tgz -C /data
+# WHAT IS BACKED UP: the world, PLUS the small config JSONs that live in /data
+# rather than /data/world. An earlier version tarred only "world", which looked
+# complete and was not: ops.json, whitelist.json and the ban lists sit outside
+# it, so a restore would have come back with NOBODY as operator, an empty
+# whitelist and every ban lifted -- on a server whose port is reachable by
+# anyone on the tailnet. They are a few KB; there is no reason to omit them.
 # ============================================================================
+
 set -uo pipefail
 
 VOLUME="${MC_VOLUME:-minecraft_data}"
@@ -78,7 +85,7 @@ ARCHIVE="$DEST/world-${STAMP}.tgz"
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${VOLUME}:/source:ro" -v "${DEST}:/backup" \
   "$HELPER_IMAGE" \
-  tar -czf "/backup/world-${STAMP}.tgz" -C /source world 2>/dev/null
+  sh -c 'cd /source && tar -czf "/backup/world-'"${STAMP}"'.tgz" world $(ls ops.json whitelist.json banned-players.json banned-ips.json usercache.json server.properties 2>/dev/null)' 2>/dev/null
 RC=$?
 
 # Re-enable saving no matter how the tar went. Skipping this on failure would
