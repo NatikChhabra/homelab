@@ -1832,6 +1832,21 @@ else
     fail "minecraft/docker-compose.yml has NO mem_limit - an unbounded Minecraft JVM will exhaust the WSL VM and the OOM killer will take a JARVIS container, not Minecraft; restore mem_limit"
   fi
 
+  # INCIDENT THIS GUARDS (2026-09-09): the minecraft stack was written without
+  # the dns: override every other outbound-calling service here carries. The
+  # modpack installer then failed nine times in a row with
+  #   java.net.UnknownHostException: Failed to resolve 'api.curseforge.com'
+  #   DnsErrorCauseException: Query failed with SERVFAIL
+  # OOMKilled was false and the exit code was 0, so it read as a memory problem
+  # for several minutes and was not one. The ISP resolver SERVFAILs external
+  # API hostnames; this is the same defect that silently kills TMDb lookups in
+  # the streaming stack, and it is invisible until something needs the network.
+  if grep -qE '^\s*dns:' "$_mccompose"; then
+    ok "minecraft has the dns: override (CurseForge API resolvable)"
+  else
+    fail "minecraft/docker-compose.yml has NO dns: override - the ISP resolver SERVFAILs api.curseforge.com, so mod installs and updates fail with UnknownHostException while looking like a memory fault; add dns: 1.1.1.1 / 8.8.8.8"
+  fi
+
   # Geyser cannot translate modded blocks/items, so a Bedrock listener on a
   # Tensura server is a port that either refuses joins or drops players into a
   # world they cannot render. Publishing it would look like crossplay works.
@@ -1868,9 +1883,16 @@ fi
 # reports it -- downloads simply stop happening. Worse, every port check above
 # fails at once, which reads like the media stack has broken rather than like
 # it was deliberately stopped. This turns that confusing flood into one cause.
-_jarvis_up=$(docker inspect -f '{{.State.Status}}' jarvis-voice 2>/dev/null)
+# The reference container must be one game mode NEVER stops, or the check
+# cannot fire. This first used jarvis-voice and was silently broken from the
+# moment mc-gamemode.ps1 gained -IncludeJarvis: that switch stops jarvis too,
+# so "jarvis up AND sonarr down" was unsatisfiable and the audit cheerfully
+# reported "game mode is off" while eight stacks were parked. AdGuard is the
+# correct reference -- it is protected unconditionally, because it is DNS for
+# the whole tailnet.
+_ref_up=$(docker inspect -f '{{.State.Status}}' adguardhome 2>/dev/null)
 _sonarr_up=$(docker inspect -f '{{.State.Status}}' sonarr 2>/dev/null)
-if [ "$_jarvis_up" = "running" ] && [ "$_sonarr_up" != "running" ]; then
+if [ "$_ref_up" = "running" ] && [ "$_sonarr_up" != "running" ]; then
   warn "GAME MODE APPEARS TO BE ON: jarvis is up but sonarr is not. If you finished playing Minecraft, run  Stacks\minecraft\mc-gamemode.ps1 -Off  -- until you do, nothing downloads and the *arr failures above are a consequence of this, not separate faults"
 else
   ok "game mode is off (media stack is not parked)"
