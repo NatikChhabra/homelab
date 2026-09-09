@@ -13,7 +13,23 @@ services:
   minecraft:
     image: itzg/minecraft-server:java21     # MC 1.21.1 requires Java 21
     container_name: minecraft
-    restart: always
+    # unless-stopped, NOT the restart: always used everywhere else in this repo.
+    # This is a deliberate exception and it is load-bearing.
+    #
+    # INCIDENT 2026-09-09: Minecraft holds ~5.4 GB on a host with 15.4 GB. With
+    # restart:always it came back automatically every time the Docker engine
+    # restarted -- including while nobody was playing -- and the box went into
+    # swap exhaustion (SwapFree 880 kB of 3.1 GB). AdGuard was never stopped and
+    # never crashed, but it was starved badly enough that its upstream DoH
+    # queries timed out ("Client.Timeout exceeded while awaiting headers"), so
+    # DNS for the whole house went down. Nothing looked broken: the container
+    # was up, restarts=0.
+    #
+    # unless-stopped means a deliberate `docker compose stop` STAYS stopped
+    # across engine restarts and reboots. Minecraft is now opt-in: it runs when
+    # someone chooses to play, not by default. If it crashes WHILE running it
+    # still restarts, which is the behaviour that actually matters.
+    restart: unless-stopped
     stdin_open: true
     tty: true
 
