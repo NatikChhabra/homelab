@@ -82,13 +82,13 @@ services:
       CF_SLUG: tensura-evolutions-1-21-1
       CF_MODPACK_ZIP: /modpacks/modpack.zip
 
-      # PIN THIS AFTER THE FIRST SUCCESSFUL START. Left unset on purpose:
-      # guessing a matcher that does not match makes the container fail at
-      # boot. First run resolves "latest"; read the exact file it chose with
-      #   docker logs minecraft | grep -i "resolved\|Downloading\|serverpack"
-      # then set the matcher to that value and restart. Without a pin, a pack
-      # update lands on the next container recreate and can break the world.
-      # CF_FILENAME_MATCHER: "1.0.69.9"
+      # NO CF_FILENAME_MATCHER NEEDED. It would pin which file the API resolves,
+      # but the API is not being used to fetch the pack -- ./modpack/modpack.zip
+      # IS the pin, and it cannot change unless someone replaces the file. The
+      # running version is 1.0.69.9 (MC 1.21.1, NeoForge 21.1.249, 313 mods
+      # declared, 253 installed server-side, 23 client-only excluded).
+      # Upgrading means dropping in a new zip deliberately, which is the
+      # correct amount of friction for a change that can break a live world.
 
       # ---- Memory -------------------------------------------------------
       # 5G. The manifest declares 313 mods, and 4G GC-thrashes a pack that
