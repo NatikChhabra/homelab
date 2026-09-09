@@ -183,6 +183,18 @@ services:
       # online-mode=true this must match the Mojang account exactly.
       OPS: Impackttrash
 
+      # WHITELIST. Port 25565 is published on 0.0.0.0, so anyone who can reach
+      # this host -- every device on the LAN and everyone on the tailnet -- can
+      # otherwise join, grief and leave. online-mode=true proves identity but
+      # authorises nobody. Add friends with:
+      #   docker exec minecraft rcon-cli whitelist add <name>
+      # ENFORCE_WHITELIST also kicks anyone already connected who is not on it,
+      # rather than only gating new logins.
+      WHITELIST: Impackttrash
+      ENFORCE_WHITELIST: "true"
+      # Do NOT let the image wipe the list it does not know about; existing
+      # entries added live via rcon must survive a container recreate.
+      WHITELIST_FILE: ""
       # ---- RCON ---------------------------------------------------------
       # Enabled for the Homarr tile and for graceful in-game shutdown, but
       # port 25575 is NOT published to the host. Homarr reaches it over the
