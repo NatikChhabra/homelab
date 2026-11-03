@@ -18,6 +18,7 @@ import hashlib, json, os, re, secrets, shutil, sys, time, unicodedata, urllib.pa
 
 MUSIC = r'D:\Media\music'
 TRASH = os.path.join(MUSIC, '.octo-trash', 'dupe-guard', time.strftime('%Y-%m-%d'))
+HISTORY = r'C:\ServerData\Octo\config\downloads-history.json'
 JUNK = {'from', 'smart', 'shuffle', 'official', 'youtube', 'channel', 'music', 'topic', 'vevo',
         'records', 'and', 'feat', 'ft', 'with', 'the', 'x'}
 U, P = os.environ.get('NAVIDROME_USER', ''), os.environ.get('NAVIDROME_PASS', '')
@@ -73,11 +74,19 @@ def octo_downloads():
     op.open(urllib.request.Request('http://127.0.0.1:5274/api/admin/browse/auth', method='POST', headers=h,
                                    data=json.dumps({'username': U, 'password': P}).encode()), timeout=60)
     with op.open(urllib.request.Request('http://127.0.0.1:5274/api/admin/downloads', headers=h), timeout=120) as r:
-        return json.load(r).get('downloads', [])
+        api = json.load(r).get('downloads', [])
+    # The API returns at most 200 entries (2026-11-03: 219 downloads existed), so add Octo's own
+    # complete history file, read-only. Entries there use 'Path' instead of 'path'.
+    try:
+        hist = json.load(open(HISTORY, encoding='utf-8'))
+        hist = hist if isinstance(hist, list) else hist.get('items') or hist.get('downloads') or []
+    except (OSError, ValueError):
+        hist = []
+    return api + [{'path': e.get('Path', '')} for e in hist if isinstance(e, dict)]
 
 
 def main():
-    stamp = time.strftime('%Y-%m-%dT%H:%M:%S')
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     dry = bool(os.environ.get('DRY_RUN'))
     # Octo writes /music/<file>; Navidrome reports paths relative to the same root.
     octo_files = {d['path'][len('/music/'):] for d in octo_downloads() if d.get('path', '').startswith('/music/')}
