@@ -27,7 +27,13 @@
 $ErrorActionPreference = 'Stop'
 $LogFile   = 'C:\ServerData\Stacks\mount-watchdog.log'
 $HostPath  = 'D:\Media\library'
-$Probe     = 'sonarr'
+# Probe: sonarr checks /data (Server mode). In College mode sonarr is stopped and navidrome is the one
+# service left, so it checks its own D: mount, /music, instead (2026-11-03).
+$Probe     = 'sonarr'; $MountPath = '/data'; $Expect = 'library'
+foreach ($c in 'sonarr', 'navidrome') {
+    $r = $null; try { $r = & docker inspect -f '{{.State.Running}}' $c 2>$null } catch {}
+    if ($r -eq 'true') { $Probe = $c; if ($c -eq 'navidrome') { $MountPath = '/music'; $Expect = '.' }; break }
+}
 $MinSizeGB = 100
 
 # ---- Uptime Kuma heartbeat (added 2026-07-28) ------------------------------
@@ -98,21 +104,63 @@ function Test-DataMount {
     # Returns $true only when /data is a real, large, populated mount. Checking
     # that the path merely exists is useless -- a dead mount still has the dir.
     try {
-        $out = & docker exec $Probe sh -c 'df -BG /data 2>/dev/null | tail -1' 2>$null
+        # df -kP prints the same columns in GNU (sonarr) and BusyBox (navidrome); BusyBox ignores the G in -BG.
+        $out = & docker exec $Probe sh -c "df -kP $MountPath 2>/dev/null | tail -1" 2>$null
         if (-not $out) { return $false }
         if ($out -match 'No such device') { return $false }
-        $sizeField = ($out -split '\s+') | Where-Object { $_ -match '^\d+G$' } | Select-Object -First 1
-        if (-not $sizeField) { return $false }
-        $gb = [int]($sizeField -replace 'G','')
+        $kb = ($out -split '\s+') | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1
+        if (-not $kb) { return $false }
+        $gb = [int]([int64]$kb / 1048576)
         if ($gb -lt $MinSizeGB) { return $false }
-        $ls = & docker exec $Probe sh -c 'ls /data 2>/dev/null' 2>$null
-        return ($ls -match 'library')
+        $ls = & docker exec $Probe sh -c "ls $MountPath 2>/dev/null" 2>$null
+        return [bool]($ls -match $Expect)
     } catch { return $false }
 }
 
 if (Test-DataMount) {
     Log 'OK  /data mount healthy'
-    Send-Heartbeat -State 'up' -Message '/data mount healthy'
+    # Job freshness (added 2026-11-01). Kuma 1.23 restarts every push monitor's
+    # timer when it starts, and Docker restarts often here, so a nightly job
+    # that silently stopped could stay "up" forever. This heartbeat fires every
+    # 10 min and its monitor does alert, so it carries the check: any run-job
+    # status file that is overdue or failed turns this monitor DOWN, naming it.
+    $maxHours = @{ 'backup-volumes' = 27; 'update-audit' = 27; 'shrink-library' = 27; 'lb-discovery' = 27; 'music-dupe-guard' = 3; 'rolling-window' = 2; 'orphan-cleanup' = 194; 'server-audit' = 194 }
+    $problems = foreach ($job in $maxHours.Keys) {
+        $f = "C:\ServerData\Stacks\logs\$job-status.json"
+        if (-not (Test-Path $f)) { continue }
+        try { $st = Get-Content $f -Raw | ConvertFrom-Json } catch { "$job (status unreadable)"; continue }
+        $age = ((Get-Date).ToUniversalTime() - ([datetime]$st.finishedUtc).ToUniversalTime()).TotalHours
+        # Age only: a job that ran and FAILED already pushes its own monitor down
+        # (run-job.ps1). Re-flagging failures here made this monitor and the
+        # weekly audit hold each other DOWN (seen 2026-11-01). Overdue = silent.
+        if ($age -gt $maxHours[$job]) { "$job overdue ($([int]$age) h since last run)" }
+    }
+    if ($problems) {
+        Log ('JOBS  ' + ($problems -join '; '))
+        Send-Heartbeat -State 'down' -Message ('mount OK, but jobs need attention: ' + ($problems -join '; '))
+        exit 0
+    }
+    Send-Heartbeat -State 'up' -Message '/data mount healthy; scheduled jobs fresh'
+    exit 0
+}
+
+# A dead mount leaves the containers RUNNING. If the engine is not answering or
+# the probe container is not running, this is a boot, a Docker start or a
+# planned container restart -- not a dead mount. Restarting Docker Desktop then
+# only takes AdGuard (family DNS) down for ~2 min; it did exactly that after all
+# 3 boots on 2026-11-01. Skip; a real dead mount is caught on the next run.
+# The server version is empty until the engine answers ('docker info' prints client text even when it is
+# down, and under ErrorActionPreference=Stop its stderr killed this script at every boot).
+$engine = $null; try { $engine = & docker version -f '{{.Server.Version}}' 2>$null } catch {}
+if (-not $engine) {
+    Log 'SKIP  docker engine not answering (starting?) - no Docker restart this cycle'
+    Send-Heartbeat -State 'down' -Message 'docker engine not answering - mount not checked'
+    exit 0
+}
+$probeRunning = $null; try { $probeRunning = (& docker inspect -f '{{.State.Running}}' $Probe 2>$null) } catch {}
+if ($probeRunning -ne 'true') {
+    Log ("SKIP  probe container {0} not running - mount not checked, Docker not restarted" -f $Probe)
+    Send-Heartbeat -State 'up' -Message "probe $Probe not running - mount check skipped"
     exit 0
 }
 
