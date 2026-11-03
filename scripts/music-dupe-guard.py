@@ -120,6 +120,7 @@ def main():
     if moved:
         subsonic('startScan')
     print(f"{stamp} checked {len(songs)} songs, {len(octo_files)} Octo downloads, moved {moved} duplicate(s)")
+    print(f"{stamp} SUMMARY checked={len(songs)} moved={moved}")
 
 
 if __name__ == '__main__':

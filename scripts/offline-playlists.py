@@ -12,7 +12,7 @@
 # an hour on 2026-11-03 and was removed at the owner's request.
 # The playlist is only rewritten when its songs or order changed, and keeps its id (the phone's
 # Keep downloaded switch is tied to the id). DRY_RUN=1 reports only. Run through scripts/run-py.sh.
-import hashlib, json, os, secrets, sys, urllib.parse, urllib.request
+import datetime, hashlib, json, os, secrets, sys, urllib.parse, urllib.request
 
 U, P = os.environ.get('NAVIDROME_USER', ''), os.environ.get('NAVIDROME_PASS', '')
 BASE = 'http://localhost:4533/rest/'
@@ -49,10 +49,12 @@ def sync(name, want, playlists):
     have = [e['id'] for e in call('getPlaylist', [('id', pid)])['playlist'].get('entry', [])]
     if have == want:
         print(f'{name}: up to date ({len(want)} songs)')
-        return
-    print(f'{name}: {len(have)} -> {len(want)} songs (+{len(set(want) - set(have))} -{len(set(have) - set(want))})')
+        return f'{name} {len(want)} songs, unchanged'
+    change = f'{len(have)} -> {len(want)} songs (+{len(set(want) - set(have))} -{len(set(have) - set(want))})'
+    print(f'{name}: {change}')
     if not DRY:
         call('createPlaylist', [('playlistId', pid)] + [('songId', i) for i in want])   # replaces the songs, same id
+    return f'{name} {change}'
 
 
 def main():
@@ -63,7 +65,8 @@ def main():
         sys.exit(f'only {len(songs)} songs in the library -- refusing to rewrite playlists')
     everything = [s['id'] for s in sorted(songs, key=lambda s: s.get('created', ''), reverse=True)]
     playlists = call('getPlaylists').get('playlists', {}).get('playlist', [])
-    sync('Everything', everything, playlists)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%FT%TZ')
+    print(f"{stamp} SUMMARY {sync('Everything', everything, playlists) or 'Everything created'}")
 
 
 if __name__ == '__main__':
