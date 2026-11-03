@@ -34,7 +34,12 @@ COUNT=0
 
 while IFS= read -r k; do
   [ -z "$k" ] && continue
+  # Identifiers, not secrets: matching them only buried real leaks in noise (2026-11-03).
+  case "$k" in *_URL|*_IP|*_HOST|*_PORT|*_USER|*_USERNAME) continue ;; esac
   v=$(grep -oP "(?<=^${k}=).*" "$SECRETS" || true)
+  # Strip one pair of surrounding quotes, as bash sourcing and run-job.ps1 do. Quoted values
+  # (e.g. PROWLARR_KEY) were searched WITH their quotes and so never matched (2026-11-03).
+  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
   [ -z "$v" ] && continue
   [ "${#v}" -lt 6 ] && continue
 
