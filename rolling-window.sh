@@ -220,8 +220,8 @@ sonarr()     { docker exec sonarr sh -c "curl -s -H 'X-Api-Key: $SONARR_KEY' '$S
 sonarr_delq() { docker exec sonarr sh -c "curl -s -o /dev/null -w '%{http_code}' -X DELETE -H 'X-Api-Key: $SONARR_KEY' '$SONARR_URL$1'"; }
 sonarr_put() { docker exec sonarr sh -c "curl -s -X PUT -H 'X-Api-Key: $SONARR_KEY' -H 'Content-Type: application/json' -d '$2' '$SONARR_URL$1'"; }
 sonarr_del() { docker exec sonarr sh -c "curl -s -o /dev/null -w '%{http_code}' -X DELETE -H 'X-Api-Key: $SONARR_KEY' '$SONARR_URL$1'"; }
-jf()         { docker exec jellyfin sh -c "curl -s -H 'X-Emby-Token: $JELLYFIN_KEY' '$JELLYFIN_URL$1'"; }
-jf_post()    { docker exec jellyfin sh -c "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Emby-Token: $JELLYFIN_KEY' '$JELLYFIN_URL$1'"; }
+jf()         { docker exec jellyfin sh -c "curl -s -H 'Authorization: MediaBrowser Token=$JELLYFIN_KEY' '$JELLYFIN_URL$1'"; }
+jf_post()    { docker exec jellyfin sh -c "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: MediaBrowser Token=$JELLYFIN_KEY' '$JELLYFIN_URL$1'"; }
 sonarr_post() { docker exec sonarr sh -c "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Api-Key: $SONARR_KEY' -H 'Content-Type: application/json' -d '$2' '$SONARR_URL$1'"; }
 jq_c()       { docker exec -i sonarr jq "$@"; }
 
