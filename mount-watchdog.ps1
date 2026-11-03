@@ -90,7 +90,8 @@ function Send-Heartbeat {
 }
 
 function Log($msg) {
-    $line = ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ'), $msg)
+    # 2026-11-03: was local IST time with a 'Z' suffix, 5h30 off from every other log.
+    $line = ('{0} {1}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $msg)
     Add-Content -Path $LogFile -Value $line
     Write-Output $line
 }
@@ -124,7 +125,7 @@ if (Test-DataMount) {
     # that silently stopped could stay "up" forever. This heartbeat fires every
     # 10 min and its monitor does alert, so it carries the check: any run-job
     # status file that is overdue or failed turns this monitor DOWN, naming it.
-    $maxHours = @{ 'backup-volumes' = 27; 'update-audit' = 27; 'shrink-library' = 27; 'lb-discovery' = 27; 'music-dupe-guard' = 3; 'rolling-window' = 2; 'orphan-cleanup' = 194; 'server-audit' = 194 }
+    $maxHours = @{ 'backup-volumes' = 27; 'update-audit' = 27; 'shrink-library' = 27; 'lb-discovery' = 27; 'music-dupe-guard' = 3; 'offline-playlists' = 1; 'rolling-window' = 2; 'orphan-cleanup' = 194; 'server-audit' = 194 }
     $problems = foreach ($job in $maxHours.Keys) {
         $f = "C:\ServerData\Stacks\logs\$job-status.json"
         if (-not (Test-Path $f)) { continue }
