@@ -30,6 +30,11 @@ LOG=/c/ServerData/Stacks/logs/shrink-library.log
 MAX_FILES=${MAX_FILES:-12}
 CQ=28
 DRY=${DRY_RUN:-0}
+# 2026-11-03: one encode hung for 6 h (host memory starvation) and burned the whole night.
+# Each encode now gets ENCODE_TIMEOUT seconds (the longest real one took ~7 min); a file that
+# times out goes on SKIP_LIST and is not retried until someone removes its line.
+ENCODE_TIMEOUT=${ENCODE_TIMEOUT:-1800}
+SKIP_LIST=/c/ServerData/Stacks/logs/shrink-library-skip.txt
 log(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
 
 set -a; . /c/ServerData/Stacks/secrets.env; set +a
@@ -54,22 +59,25 @@ while IFS= read -r f; do
   [ "$size" -lt 500000000 ] && continue
   [ "$links" -gt 1 ] && { log "skip (seeding/hardlinked): $f"; continue; }
   [ $(( $(date +%s) - mtime )) -lt 86400 ] && continue
+  if [ -f "$SKIP_LIST" ] && grep -Fxq -- "$f" "$SKIP_LIST"; then log "skip (timed out before, see $SKIP_LIST): $f"; continue; fi
   if [ "$DRY" = 1 ]; then log "would shrink: $f ($((size/1048576)) MB, $codec)"; done_n=$((done_n+1)); continue; fi
 
   log "encoding: $f ($((size/1048576)) MB, $codec)"
   res=$(docker exec jellyfin sh -c '
-    f="$1"; cq="$2"; FF=/usr/lib/jellyfin-ffmpeg/ffmpeg; FP=/usr/lib/jellyfin-ffmpeg/ffprobe
+    f="$1"; cq="$2"; lim="$3"; FF=/usr/lib/jellyfin-ffmpeg/ffmpeg; FP=/usr/lib/jellyfin-ffmpeg/ffprobe
     ext="${f##*.}"; tmp="${f%.*}.shrinking.$ext"
-    $FF -v error -nostdin -y -hwaccel cuda -hwaccel_output_format cuda -i "$f" -map 0 -c copy -c:v:0 hevc_nvenc -preset p7 -tune hq \
+    timeout -k 30 "$lim" $FF -v error -nostdin -y -hwaccel cuda -hwaccel_output_format cuda -i "$f" -map 0 -c copy -c:v:0 hevc_nvenc -preset p7 -tune hq \
         -rc vbr -cq "$cq" -b:v 0 -spatial_aq 1 -temporal_aq 1 -aq-strength 8 -rc-lookahead 32 -bf 4 -b_ref_mode middle \
-        -tag:v:0 hvc1 "$tmp" || { rm -f "$tmp"; echo "FAIL encode"; exit; }
+        -tag:v:0 hvc1 "$tmp"; rc=$?
+    if [ "$rc" -ne 0 ]; then rm -f "$tmp"; [ "$rc" = 124 ] && echo "FAIL timeout after ${lim}s" || echo "FAIL encode (rc $rc)"; exit; fi
     d1=$($FP -v error -show_entries format=duration -of csv=p=0 "$f"); d2=$($FP -v error -show_entries format=duration -of csv=p=0 "$tmp")
     s1=$(stat -c %s "$f"); s2=$(stat -c %s "$tmp")
     ok=$(awk -v a="$d1" -v b="$d2" -v x="$s1" -v y="$s2" "BEGIN{print ((a-b<2 && b-a<2) && y < x*0.9) ? 1 : 0}")
-    if [ "$ok" = 1 ]; then mv -f "$tmp" "$f"; echo "OK $s1 $s2"; else rm -f "$tmp"; echo "KEPT original (dur $d1 vs $d2, size $s1 vs $s2)"; fi' _ "$f" "$CQ")
+    if [ "$ok" = 1 ]; then mv -f "$tmp" "$f"; echo "OK $s1 $s2"; else rm -f "$tmp"; echo "KEPT original (dur $d1 vs $d2, size $s1 vs $s2)"; fi' _ "$f" "$CQ" "$ENCODE_TIMEOUT")
   case "$res" in
     OK*) read -r _ s1 s2 <<< "$res"; saved=$((saved + s1 - s2)); log "  done: $((s1/1048576)) -> $((s2/1048576)) MB" ;;
-    *)   log "  $res"; case "$res" in FAIL*|"") fails=$((fails+1)) ;; esac ;;
+    *)   log "  $res"; case "$res" in FAIL*|"") fails=$((fails+1)) ;; esac
+         case "$res" in "FAIL timeout"*) echo "$f" >> "$SKIP_LIST"; log "  added to $SKIP_LIST" ;; esac ;;
   esac
   done_n=$((done_n+1))
 done < <(docker exec jellyfin sh -c 'find /data/library -type f \( -iname "*.mkv" -o -iname "*.mp4" \) ! -name "*.shrinking.*" | sort')
