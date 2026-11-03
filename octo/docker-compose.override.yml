@@ -1,0 +1,38 @@
+# Local changes to upstream Octo (docker-compose.yml is winters27/octo 2026.10.28
+# verbatim, so an update is a file swap). Added 2026-11-02.
+#
+# Octo is a Subsonic proxy in front of Navidrome: point Feishin at :5274 instead
+# of :4533 and search shows your library first, then outside songs (octopus
+# badge). Play streams them from YouTube; a heart downloads (Soulseek FLAC
+# first, YouTube fallback), tags, embeds the cover, writes a synced .lrc and
+# files it under D:\Media\music\Octo. :4533 keeps working as the fallback.
+#
+# Settings and secrets are in .env under upstream's own variable names (git-
+# ignored). Upstream's compose defaults differ from Octo's built-in ones, so
+# never trim its environment block -- that silently turned search discovery off.
+services:
+  octo:
+    restart: always
+    mem_limit: 768m
+    networks: [default, navidrome_default]   # reaches http://navidrome:4533
+
+  yt-dlp-shim:
+    restart: always
+    mem_limit: 512m
+
+  slskd:
+    image: slskd/slskd:0.26.2   # upstream floats :latest
+    restart: always
+    mem_limit: 512m
+    ports: !override
+      - "127.0.0.1:5030:5030"   # web UI host-only
+      - "50300:50300"           # Soulseek peer port (not forwarded on the router)
+
+  # Sounds-alike radio: 2 GB cap and always busy. Host memory starvation is what
+  # took AdGuard down before, so it stays off.
+  octo-sonic:
+    profiles: ["disabled"]
+
+networks:
+  navidrome_default:
+    external: true
