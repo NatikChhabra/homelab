@@ -164,7 +164,7 @@ Scheduled through Windows Task Scheduler (tasks named `ServerData - <Job>`). The
 | LB Discovery (run-job) | daily 06:30 | Sends ListenBrainz Weekly Exploration to Octo once LB has generated one. |
 | Weekly Audit (run-job) | Sun 05:00 | Full read-only health audit (`server-audit-report.txt`). |
 | Orphan Cleanup (run-job) | Sun 05:30 | Removes leftovers from removed downloads. |
-| Boot Check | at logon | Checks the stack came up after a reboot. |
+| Boot Check | at logon (+10 min) | Runs the full audit after a reboot and copies the result to Sync (viewable at :8095). |
 | Keep Awake | at logon (runs continuously) | Stops Modern Standby from sleeping the server. |
 | Power Shed | at logon + on power events | Sheds load (stops encodes) on battery. |
 | UDP Exhaustion Snapshot | on Tcpip event 4266 | Records which process ran the host out of UDP ports. |ily | Removes leftovers from removed downloads. |
