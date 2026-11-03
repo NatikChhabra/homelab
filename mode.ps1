@@ -77,7 +77,10 @@ if ($Mode -eq 'Server') {
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | ? CommandLine -match 'control-room\.ps1' | % { Stop-Process -Id $_.ProcessId -Force }
     Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ? CommandLine -match 'ServerData.Kiosk.edge-profile' | % { Stop-Process -Id $_.ProcessId -Force -ea 0 }
     # The mount watchdog stays on: navidrome keeps running in College mode and needs its D: mount watched.
-    $serverTasks | ? TaskName -ne 'ServerData - Mount Watchdog' | % { Disable-ScheduledTask -InputObject $_ | Out-Null }
+    # The light music jobs stay on too (2026-11-03): navidrome and Octo keep running, so a song hearted
+    # at college still reaches the phone's 'Everything' playlist and the dupe guard still cleans up.
+    $keepTasks = 'ServerData - Mount Watchdog', 'ServerData - Offline Playlists', 'ServerData - Music Dupe Guard', 'ServerData - LB Discovery'
+    $serverTasks | ? { $_.TaskName -notin $keepTasks } | % { Disable-ScheduledTask -InputObject $_ | Out-Null }
     Set-ItemProperty $winlogon AutoAdminLogon '0'   # stolen laptop must not boot to an open desktop
     # DNS before AdGuard goes down, or there is a window with no resolver at all
     $nics | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
