@@ -29,7 +29,7 @@ for what to change before any of this runs on your own hardware. Licensed MIT
 
 | Stack | Services | Purpose |
 |---|---|---|
-| `streaming` | qbittorrent, prowlarr, flaresolverr, sonarr, radarr, bazarr, jellyfin, jellyseerr, maintainerr, cleanuparr | Media acquisition, organisation and playback. The largest and most frequently edited stack. |
+| `streaming` | qbittorrent, prowlarr, flaresolverr, sonarr, radarr, bazarr, jellyfin, jellyseerr, warp | Media acquisition, organisation and playback. The largest and most frequently edited stack. |
 | `adguard` | adguardhome | Network-wide DNS filtering. |
 | `homarr` | homarr | Dashboard and single entry point to everything else. |
 | `uptime-kuma` | uptime-kuma | Uptime monitoring, including push monitors for the scheduled jobs. |
@@ -40,7 +40,9 @@ for what to change before any of this runs on your own hardware. Licensed MIT
 | `immich` | immich-server, machine-learning, postgres, valkey | Photo library. |
 | `portainer` | portainer | Container management UI. |
 | `navidrome` | navidrome | Self-hosted music streaming (Subsonic API). |
-| `jarvis` | home-assistant, ollama, whisper, piper, openwakeword, voice bridge | Local voice assistant. Speech recognition, language model and speech synthesis all run on this box; no cloud speech API is involved. |
+| *(retired)* explo | — | Replaced 2026-11-02 by `scripts/lb-discovery.py`: ListenBrainz Weekly Exploration is handed to Octo, which downloads it FLAC-first. |
+| `actual` | actual | Actual Budget, local-first personal budgeting (added 2026-11-02). |
+| `octo` | octo, yt-dlp-shim, slskd | Spotify-style search and download in front of Navidrome: outside songs in Feishin search, play streams from YouTube, a heart downloads (Soulseek FLAC, YouTube fallback) with tags, cover and synced lyrics (added 2026-11-02). Upstream compose verbatim + local `docker-compose.override.yml`. |
 
 Immich and Portainer were brought into this tree on 2026-07-28. Immich's compose
 file had been living in a Docker Desktop AI-agent scratch directory that Docker
@@ -56,16 +58,18 @@ Kept in one place because the cost of a collision is a service that silently
 fails to bind.
 
 ```
-   53  adguard (DNS)      6881  qbittorrent (peer)   9443  portainer
- 2283  immich             7575  homarr               9696  prowlarr
- 3001  uptime-kuma        7878  radarr              10200  jarvis (piper TTS)
- 3080  adguard (web UI)   8080  qbittorrent (web)   10300  jarvis (whisper STT)
- 3100  jarvis (voice UI)  8095  filebrowser         10400  jarvis (wake word)
- 3456  vikunja            8096  jellyfin            11011  cleanuparr
- 4533  navidrome          8123  jarvis (home asst)  11434  jarvis (ollama)
- 5055  jellyseerr         8191  flaresolverr        61208  glances
- 6246  maintainerr        8222  vaultwarden
- 6767  bazarr             8989  sonarr
+   53  adguard (DNS)      5055  jellyseerr          8080  qbittorrent (web)
+ 2283  immich             6767  bazarr (login)      8095  filebrowser
+ 3001  uptime-kuma        6881  qbittorrent (p2p)   8096  jellyfin
+ 3080  adguard (web UI)                       8989  sonarr
+ 3456  vikunja            7575  homarr              9443  portainer
+ 4533  navidrome          7878  radarr              9696  prowlarr
+ 5274  octo (Subsonic)   50300  slskd (Soulseek peer)
+                                                   61208  glances
+ host-only: 8222 vaultwarden (Tailscale serve HTTPS :443),
+            5006 actual budget (Tailscale serve HTTPS :5006), 5030 slskd web UI
+ no host port: flaresolverr (Prowlarr uses http://flaresolverr:8191)
+ removed: JARVIS stack (2026-10-25); maintainerr, cleanuparr (2026-11-01)
 ```
 
 ## Storage layout
@@ -207,81 +211,10 @@ most:
   unauthenticated endpoint for liveness, and separately checks that the stored
   token still authenticates, because a revoked token has no other symptom.
 
-## The voice assistant
+## The voice assistant (removed)
 
-`jarvis/` is a fully local voice assistant: six containers, no cloud speech API,
-no vendor account. Audio is captured in the browser, transcribed on this box,
-answered by a local language model, and spoken back by a local synthesiser.
-
-| Container | Port | Role |
-|---|---|---|
-| `jarvis-hass` | 8123 | Home Assistant — owns the devices and runs the conversation agent. |
-| `jarvis-ollama` | 11434 | Local language model runtime. |
-| `jarvis-whisper` | 10300 | Speech to text (Wyoming). |
-| `jarvis-piper` | 10200 | Text to speech (Wyoming). |
-| `jarvis-wake-word` | 10400 | Wake word detection, `hey_jarvis` (Wyoming). |
-| `jarvis-voice` | 3100 | Browser client, and the bridge between it and everything above. |
-
-Three things about this stack are non-obvious enough to be worth stating
-outright, because each one cost real time to work out:
-
-- **The three voice services do not speak HTTP.** Wyoming is a raw TCP JSONL
-  protocol. `curl http://localhost:10300/` fails against a perfectly healthy
-  Whisper, and that failure is not evidence of anything. An earlier health
-  endpoint did exactly that and reported all three services down while all three
-  were fine. The audit opens a socket and sends a real `describe` handshake
-  instead, using the client in `jarvis/wyoming_client.py`.
-- **A Wyoming container answers its port before it can do its job.** These
-  images fetch their models on first run, so the container is up and accepting
-  connections for minutes before it can transcribe or speak — and forever, if
-  the download failed. The audit counts *installed models*, not connections.
-- **The browser client has to be served over HTTPS.** `getUserMedia` requires a
-  secure context. Over plain HTTP on a tailnet address `navigator.mediaDevices`
-  is `undefined`, so the microphone fails with a bare `TypeError` and the page
-  looks broken with nothing anywhere naming the cause. `tailscale serve` supplies
-  the TLS on port **8443**, deliberately not 443 — 443 already serves Vaultwarden,
-  and `tailscale serve` without an explicit port replaces that handler rather
-  than adding to it. The audit asserts both mappings for that reason.
-
-The bridge exists so the Home Assistant token stays server-side: the browser
-never receives a credential. `JARVIS_HASS_TOKEN` lives in `secrets.env` like
-every other credential here.
-
-**This stack is not finished.** The language model currently runs on CPU, which
-puts a warm round trip around 8 seconds against a 3 second target, and model
-selection is still open. `jarvis/STATUS.md` records what has actually been
-measured and what has not; it is the honest account, and it is deliberately kept
-free of aspirational claims.
-
-### Adding the JARVIS tile to Homarr
-
-Homarr stores its boards in **SQLite** (`/appdata/db/db.sqlite`, a Drizzle-managed
-schema spread across `app`, `item`, `item_layout`, `layout` and `section`), not in
-an editable JSON file. Do not hand-edit that database — a tile is several rows
-that have to stay mutually consistent, and Homarr caches board state. Add it
-through the UI:
-
-1. Open Homarr and go to **`/manage/apps/new`**.
-2. Fill in:
-   - **Name** — `JARVIS`
-   - **URL** — `https://<your-tailnet-host>:8443/`
-     **This must be the HTTPS address, not `http://<host>:3100/`.** The tile is
-     how the assistant actually gets opened, and over plain HTTP the microphone
-     silently will not start. This is the same reason Vaultwarden's tile uses an
-     HTTPS URL while every other tile uses a plain LAN one.
-   - **Ping URL** — `http://jarvis-voice:3100/healthz`
-     A container name, not the host address: Homarr runs its status checks
-     server-side from inside its own container, and on Docker Desktop for
-     Windows a container cannot reach the host's published ports. `/healthz`
-     returns `{"status": "ok"}` with a 200.
-   - **Icon** — search `home-assistant`, or any icon you prefer.
-3. Save, then open the board at **`/boards/dashboard`**, turn on edit mode, add
-   an **App** item to the **Infrastructure** section, and select `JARVIS`.
-
-The status dot only works because `homarr-homarr-1` is attached to the
-`jarvis_jarvis` network — that is what the entry in `homarr/docker-compose.yml`
-is for. Without it the ping resolves nothing and the tile sits permanently red
-while the service is perfectly healthy.
+The `jarvis/` stack (Home Assistant, Ollama, Whisper, Piper, wake word, voice
+bridge) was removed on 2026-10-25. Its notes live in git history.
 
 ## Networking, and one trap worth knowing
 
