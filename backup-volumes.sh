@@ -80,11 +80,9 @@ verify() {  # $1=archive path -> 0 if it is a readable, non-empty tar.gz
 # Docker not answering used to mean zero volumes and a green run. It is a failure, and so is a list far
 # shorter than usual (18 on 2026-11-03).
 VOLS=$(docker volume ls --format '{{.Name}}' 2>&1) || { log "  FAIL  docker volume ls -- docker unavailable: $VOLS"; BAD=$((BAD+1)); VOLS=; }
-NVOL=$(printf '%s
-' "$VOLS" | grep -Evc "$SKIP_RE|^$")
+NVOL=$(printf '%s\n' "$VOLS" | grep -Evc "$SKIP_RE|^$")
 [ "$NVOL" -lt 15 ] && { log "  FAIL  only $NVOL volumes discovered (expected about 18)"; BAD=$((BAD+1)); }
-for VOL in $(printf '%s
-' "$VOLS" | grep -Ev "$SKIP_RE|^$" | sort); do
+for VOL in $(printf '%s\n' "$VOLS" | grep -Ev "$SKIP_RE|^$" | sort); do
   A="${VOL}_${DATESTAMP}.tar.gz"
   MSYS_NO_PATHCONV=1 docker run --rm \
     -v "${VOL}:/source:ro" -v "${BACKUP_DIR}:/backup" \
