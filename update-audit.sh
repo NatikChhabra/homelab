@@ -41,7 +41,7 @@ jq_c() { docker exec -i sonarr jq "$@"; }
 
 EXIT_CODE=0
 N_CURRENT=0; N_PATCH=0; N_MINOR=0; N_MAJOR=0; N_RENAMED=0; N_STALE=0; N_ERROR=0
-N_SKIPPED=0
+N_SKIPPED=0; N_NOTRECREATED=0
 
 log "=========================================================="
 log "update-audit START  (stale threshold: ${STALE_DAYS}d)"
@@ -166,6 +166,17 @@ for cname in $CONTAINERS; do
   log "CONTAINER $cname"
   log "  image        : $ref"
   log "  local version: ${local_ver:-<no version label>}"
+
+  # The checks below read the image the TAG points at. A container pulled-but-
+  # not-recreated still runs the old image while the tag already looks current
+  # (seen 2026-11-01 with qbittorrent), so compare what is actually running.
+  running_id=$(printf '%s' "$INFO" | cut -d'|' -f2)
+  tag_id=$(docker image inspect "$ref" --format '{{.Id}}' 2>/dev/null)
+  if [ -n "$tag_id" ] && [ "$running_id" != "$tag_id" ]; then
+    log "  NOT RECREATED  newer image is pulled but this container still runs the old one."
+    log "                 apply with: cd '$workdir' && docker compose up -d --no-deps $svc"
+    N_NOTRECREATED=$((N_NOTRECREATED+1)); EXIT_CODE=1
+  fi
 
   if [ -z "$local_dig" ]; then
     log "  ERROR  no RepoDigest locally (image built or loaded, not pulled) — cannot audit"
@@ -311,7 +322,7 @@ else
 fi
 
 log "=========================================================="
-log "SUMMARY  current=$N_CURRENT  patch=$N_PATCH  minor=$N_MINOR  HELD(major/unknown)=$N_MAJOR  RENAMED=$N_RENAMED  stale=$N_STALE  rate-limited=$N_SKIPPED  errors=$N_ERROR"
+log "SUMMARY  current=$N_CURRENT  patch=$N_PATCH  minor=$N_MINOR  HELD(major/unknown)=$N_MAJOR  RENAMED=$N_RENAMED  stale=$N_STALE  rate-limited=$N_SKIPPED  errors=$N_ERROR  not-recreated=$N_NOTRECREATED"
 if [ "$N_MAJOR" -gt 0 ] || [ "$N_RENAMED" -gt 0 ]; then
   log "ACTION NEEDED: $((N_MAJOR + N_RENAMED)) item(s) are waiting on your decision (see above)."
 fi
