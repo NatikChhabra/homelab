@@ -50,7 +50,7 @@ is free to delete, and Portainer had no compose file at all — it existed only 
 a running container created by hand. Every running container is now defined by a
 file here, and the audit warns if one is not.
 
-Traccar no longer runs; its data folder was moved to Backupsetired-apps-2026-11-03 with the other retired apps (2026-11-03).
+Traccar no longer runs; its data folder was moved to Backups/retired-apps-2026-11-03 with the other retired apps (2026-11-03).
 
 ## Ports
 
