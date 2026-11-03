@@ -9,6 +9,9 @@ services:
     image: deluan/navidrome:latest
     container_name: navidrome
     restart: always
+    # 2026-11-03 audit: a ceiling so a runaway can never starve the WSL VM that AdGuard
+    # (DNS for the house) shares. peak 546 MiB during a scan; the cap is about twice that.
+    mem_limit: 1g
     ports:
       - "4533:4533"
     environment:
