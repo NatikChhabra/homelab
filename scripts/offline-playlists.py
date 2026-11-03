@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # offline-playlists.py -- keep the two playlists the phone keeps downloaded in step with the library.
 #
-# Added 2026-11-03. The Octo phone app downloads a playlist for offline ("Keep downloaded") but
-# skips read-only smart playlists, so these are plain playlists this job rewrites:
+# Added 2026-11-03; runs every 2 min (a no-op unless something changed), so the phone's
+# Settings > Sync now is the only button needed. The Octo phone app downloads a playlist for
+# offline ("Keep downloaded") but skips read-only smart playlists, so these are plain
+# playlists this job rewrites:
 #   - "Everything"  = every song in the library, newest first. Kept downloaded on the phone, so a
 #                     new song lands on the phone at its next sync (how Symfonium worked).
 #   - "Liked Songs" = the favourites, newest first. Pinned to Octo's Home so they are easy to see.
