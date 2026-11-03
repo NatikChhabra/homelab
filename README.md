@@ -50,7 +50,7 @@ is free to delete, and Portainer had no compose file at all — it existed only 
 a running container created by hand. Every running container is now defined by a
 file here, and the audit fails if one is not.
 
-Traccar still runs outside this tree.
+Traccar no longer runs (only its data folder is left).
 
 ## Ports
 
@@ -194,8 +194,7 @@ It covers containers and HTTP endpoints for every stack, that the media disk is
 genuinely mounted rather than an empty stub, disk headroom, hardlink efficiency,
 BitTorrent transport, outbound DNS to the metadata providers, app health, library
 consistency, that DNS filtering actually resolves a name rather than merely
-running, that the voice services answer a real Wyoming handshake with their
-models installed, that every photo in the database still has its original file on
+running, that every photo in the database still has its original file on
 disk, that backups are current and actually extract, that the photo backup is not
 silently shrinking, and that no credential is hardcoded or tracked by git.
 
@@ -304,7 +303,7 @@ From inside a stack directory:
 
 ```
 docker compose up -d          # start or apply changes
-docker compose pull           # fetch newer images
+bash ../docker-pull.sh <image> # fetch a newer image (plain `docker compose pull` fails here)
 docker compose logs -f <svc>  # tail one service
 docker compose restart <svc>  # restart after a config change
 ```

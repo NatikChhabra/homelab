@@ -84,7 +84,7 @@ Config conventions:
 ```powershell
 docker compose up -d          # start/update the stack
 docker compose down           # stop and remove containers (volumes persist)
-docker compose pull           # pull latest images
+bash ../docker-pull.sh <image> # pull a newer image (plain `docker compose pull` fails: section 6)
 docker compose logs -f <svc>  # tail logs for one service
 docker compose restart <svc>  # restart a single service after a config change
 ```
@@ -296,7 +296,7 @@ work around it silently.
 6. Anything that surprised you or contradicts this file.
 7. What you would do next, and why.
 
-Written to repo root. Scanned for secrets. One report, edited — never appended.
+Delivered as section 2 says (Artifact + scanned copy in Sync). Scanned for secrets. One report, edited, never appended.
 
 ---
 
