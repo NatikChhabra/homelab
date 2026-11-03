@@ -822,7 +822,10 @@ sec "18. Immich library integrity"
 # next occurrence is caught while a backup can still fix it.
 IM_DB=immich-database-1
 IM_SRV=immich-immich-server-1
-if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running; then
+# AUDIT_SKIP_IMMICH=1 skips this read-only check for ad-hoc runs (owner: no poking Immich);
+# the scheduled weekly run keeps it, since it is what notices lost photo originals (2026-11-03).
+if [ "${AUDIT_SKIP_IMMICH:-0}" = 1 ]; then ok "Immich integrity check skipped (AUDIT_SKIP_IMMICH=1)"
+elif docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running; then
   # POSTGRES_USER is read from the container rather than hardcoded -- it
   # contains a space, which is exactly the kind of thing that rots in a script.
   im_user=$(docker inspect "$IM_DB" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
@@ -856,7 +859,7 @@ if docker inspect -f '{{.State.Status}}' "$IM_SRV" 2>/dev/null | grep -q running
           [ -z "$p" ] && continue
           [ -f "$p" ] || printf "%s\n" "$p"
         done < /tmp/_audit_paths.txt' 2>/dev/null | tr -d '\r' | sort > /tmp/_immich_missing.txt
-      docker exec "$IM_SRV" rm -f /tmp/_audit_paths.txt >/dev/null 2>&1
+      MSYS_NO_PATHCONV=1 docker exec "$IM_SRV" rm -f /tmp/_audit_paths.txt >/dev/null 2>&1   # Git Bash mangled /tmp before
       rm -f /tmp/_immich_paths.txt
       im_missing=$(awk 'NF {n++} END {print n+0}' /tmp/_immich_missing.txt 2>/dev/null)
       IM_BASELINE="${IM_BASELINE:-/c/ServerData/Stacks/immich-lost-baseline.txt}"
