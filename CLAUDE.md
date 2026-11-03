@@ -66,8 +66,8 @@ physical disk from the live data.
 - `Stacks/navidrome/` — music server (4533); `Stacks/octo/` — Octo proxy, slskd, yt-dlp-shim (see Octo below).
 - `Stacks/actual/` — Actual budget; `Stacks/portainer/` — Portainer (9443).
 
-Note (2026-11-03): AdGuard and Immich DO have compose files under `Stacks/` now. Traccar has a
-data dir only and no stack.
+Note (2026-11-03): AdGuard and Immich DO have compose files under `Stacks/` now. Traccar, Cleanuparr,
+Maintainerr and Tiramisu are retired; their data folders are in Backupsetired-apps-2026-11-03.
 
 Config conventions:
 - Containers use `PUID=1000`, `PGID=1000`, `TZ=Asia/Kolkata` where applicable (linuxserver.io images).
