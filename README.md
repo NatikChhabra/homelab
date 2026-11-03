@@ -149,16 +149,25 @@ jobs, `docker-pull.sh`) and it's a standard Compose tree.
 
 ## Automation
 
-Scheduled through Windows Task Scheduler, each wrapped by `run-job.ps1`, which
-captures a per-run transcript, writes a status file, pings an Uptime Kuma push
-monitor, logs failures to the Windows event log, and refuses to start if the
-previous run is still going.
-
-| Job | Cadence | What it does |
+Scheduled through Windows Task Scheduler (tasks named `ServerData - <Job>`). The jobs marked
+"run-job" go through `run-job.ps1`, which captures a per-run transcript, writes
+`logs/<job>-status.json`, pings the job's Uptime Kuma push monitor (the SUMMARY line becomes th| Job | Cadence | What it does |
 |---|---|---|
-| Rolling Window | every 20 min | Keeps the watched/unwatched library window in shape. |
-| Mount Watchdog | frequent | Confirms the media disk is really mounted. |
-| Orphan Cleanup | daily | Removes leftovers from removed downloads. |
+| Offline Playlists (run-job) | every 2 min | Keeps the Navidrome playlist "Everything" equal to the library; the phone's Octo app keeps it downloaded. |
+| Mount Watchdog | every 3 min + at boot | Confirms the media disk is really mounted, repairs it, and flags stale jobs. |
+| Rolling Window (run-job) | every 20 min + at boot | Keeps the watched/unwatched library window in shape. |
+| Music Dupe Guard (run-job) | hourly | Moves Octo downloads that duplicate songs already owned to .octo-trash. |
+| Shrink Library (run-job) | daily 01:30 | GPU re-encodes large H.264 files to HEVC (12 a night, 30 min limit per file, skip list for hangs). |
+| Immich Auto Albums | daily 03:00 | Builds Immich albums. |
+| Daily Backup (run-job) | daily 04:00 | Archives volumes and bind mounts to D:\Backups, 14-day retention. |
+| Update Audit (run-job) | daily 04:30 | Compares image digests with the registries and stages updates. |
+| LB Discovery (run-job) | daily 06:30 | Sends ListenBrainz Weekly Exploration to Octo once LB has generated one. |
+| Weekly Audit (run-job) | Sun 05:00 | Full read-only health audit (`server-audit-report.txt`). |
+| Orphan Cleanup (run-job) | Sun 05:30 | Removes leftovers from removed downloads. |
+| Boot Check | at logon | Checks the stack came up after a reboot. |
+| Keep Awake | at logon (runs continuously) | Stops Modern Standby from sleeping the server. |
+| Power Shed | at logon + on power events | Sheds load (stops encodes) on battery. |
+| UDP Exhaustion Snapshot | on Tcpip event 4266 | Records which process ran the host out of UDP ports. |ily | Removes leftovers from removed downloads. |
 | Update Audit | daily | Compares local image digests against the registry. |
 | Daily Backup | nightly | Archives volumes and bind mounts, 14-day retention. |
 | Weekly Audit | Sundays 05:00 | Full read-only health audit. |
