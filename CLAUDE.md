@@ -30,9 +30,9 @@ output shorter.
 home server running self-hosted apps via Docker Desktop. No app code to build/lint/test here.
 Work = editing Docker Compose stacks, app config files, managing container/volume state.
 
-Each top-level folder (`AdGuard/`, `Jellyfin/`, `Radarr/`, `Sonarr/`, `Bazarr/`, `Prowlarr/`,
-`Jellyseerr/`, `qBittorrent/`, `Vaultwarden/`, `Vikunja/`,
-`Immich/`, `Traccar/`): bind-mounted config/data dir for the matching container — runtime state
+Each top-level app folder (`AdGuard/`, `Jellyfin/`, `Radarr/`, `Sonarr/`, `Bazarr/`, `Prowlarr/`,
+`Jellyseerr/`, `qBittorrent/`, `Vaultwarden/`, `Vikunja/`, `Immich/`, `Navidrome/`, `Octo/`,
+`Actual/`): bind-mounted config/data dir for the matching container — runtime state
 (SQLite/Postgres DBs, YAML configs, logs, media libraries), not code. Leave alone unless debugging
 that service.
 
@@ -194,8 +194,8 @@ and nothing to recover. That single incident is why half these rules exist.
 - Back up to `<file>.bak.<UTC-timestamp>` before any overwrite.
 - Ask before deleting, renaming or moving anything.
 - **One task per commit**, conventional message (`feat:`/`fix:`/`chore:`/`docs:`/`test:`).
-- `.gitignore` includes `*.json`, `*.yaml`, `__pycache__/`, `*.pyc` — so `registry.json`,
-  every `manifest.yaml`, and all config are **untracked by default**. Anything that matters
+- `.gitignore` is an ALLOWLIST (`*`, then `!` add-backs for *.sh, *.ps1, *.py, *.vbs, compose
+  files, *.conf): any other file type is **untracked by default**. Anything that matters
   needs `git add -f`.
 
 ---

@@ -48,7 +48,7 @@ Immich and Portainer were brought into this tree on 2026-07-28. Immich's compose
 file had been living in a Docker Desktop AI-agent scratch directory that Docker
 is free to delete, and Portainer had no compose file at all — it existed only as
 a running container created by hand. Every running container is now defined by a
-file here, and the audit fails if one is not.
+file here, and the audit warns if one is not.
 
 Traccar no longer runs (only its data folder is left).
 
@@ -217,9 +217,9 @@ most:
   healthcheck aimed at an authenticated Home Assistant endpoint returned 401 on
   every attempt, so the container reported `unhealthy` across 56 consecutive
   probes while serving perfectly — and each probe was logged as a failed login,
-  walking it towards banning its own healthcheck. The audit probes an
-  unauthenticated endpoint for liveness, and separately checks that the stored
-  token still authenticates, because a revoked token has no other symptom.
+  walking it towards banning its own healthcheck. (Home Assistant is gone since
+  2026-10-25; the lesson stands: liveness probes hit unauthenticated endpoints,
+  and a stored token is checked separately, because a revoked token has no other symptom.)
 
 ## The voice assistant (removed)
 
@@ -243,8 +243,8 @@ was achieved.** It will happily print `53/udp -> 0.0.0.0:53` when nothing is
 listening. Verify with `Get-NetUDPEndpoint -LocalPort 53`, or by actually
 resolving a name.
 
-DNS filtering is reachable only from the tailnet: the AdGuard firewall rules
-are scoped to `100.64.0.0/10`. No Tailscale DNS override is used, deliberately
+AdGuard is the DNS for the home network (the router hands out this server, 192.168.1.107)
+and for tailnet devices that choose it. No Tailscale DNS override is used, deliberately
 — a tailnet-wide override means this machine being off takes DNS down with it.
 
 ## Pulling images
@@ -291,8 +291,9 @@ runs, so it is not a consistent copy. Restore from Immich's own nightly dump in
 database-restore steps (fresh database volume, then load the dump with `psql`).
 Photos themselves are files under `C:\ServerData\Immich` and need no database step.
 
-The restore test in the nightly run only extracts `sonarr_config` into a temp folder,
-so a real restore of anything else is untested until you do it.
+The restore test in the weekly audit (and Boot Check) extracts only the newest `sonarr_config`
+archive into a temp folder; the nightly backup lists each archive (`tar -t`). A real restore of
+anything else is untested until you do it.
 
 ## Working on this
 
