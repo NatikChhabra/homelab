@@ -24,6 +24,8 @@
 # Usage:  bash docker-pull.sh adguard/adguardhome:latest
 #         bash docker-pull.sh ghcr.io/immich-app/immich-server:release
 #
+# If a ghcr.io pull STALLS (Airtel throttles that CDN), use warp-pull.sh instead.
+#
 # If `docker pull` ever starts working again, this script becomes redundant --
 # it is a workaround for a broken host, not a better way to pull images.
 # ============================================================================

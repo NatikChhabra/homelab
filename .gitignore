@@ -17,6 +17,7 @@
 
 # --- the actual stack definitions --------------------------------------------
 !*/docker-compose.yml
+!*/docker-compose.override.yml
 
 # --- automation --------------------------------------------------------------
 !*.sh
