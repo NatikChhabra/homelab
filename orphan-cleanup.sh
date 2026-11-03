@@ -82,9 +82,12 @@ log "=========================================================="
 [ -d "$HOST_ROOT" ] || { log "FATAL  torrent root '$HOST_ROOT' not found - aborting."; exit 2; }
 
 # ---- Guard 3: qBittorrent must answer --------------------------------------
-COOKIE=/tmp/oc_qb_cookie
-sq "curl -s -c $COOKIE -o /dev/null -X POST --data 'username=$QB_USER&password=$QB_PASS' -H 'Referer: $QB_URL' '$QB_URL/api/v2/auth/login'" >/dev/null 2>&1
-QB_VER=$(sq "curl -s -m 20 -b $COOKIE '$QB_URL/api/v2/app/version'" 2>/dev/null | tr -d '\r')
+# 2026-11-01: curl 8.22 in the sonarr container stopped sending cookies back to
+# a dotless host ("qbittorrent"), so the cookie jar silently produced 403s and
+# this job failed every night. Take the session id from the login response.
+QB_SID=$(sq "curl -s -i -X POST --data 'username=$QB_USER&password=$QB_PASS' -H 'Referer: $QB_URL' '$QB_URL/api/v2/auth/login'" 2>/dev/null \
+  | tr -d '\r' | sed -n 's/^[Ss]et-[Cc]ookie: \(QBT_SID_[0-9]*=[^;]*\).*/\1/p' | head -1)
+QB_VER=$(sq "curl -s -m 20 -H 'Cookie: $QB_SID' '$QB_URL/api/v2/app/version'" 2>/dev/null | tr -d '\r')
 
 case "$QB_VER" in
   v*) log "qBittorrent reachable ($QB_VER)" ;;
@@ -97,7 +100,7 @@ esac
 
 # ---- Build the exclusion set: every torrent qBittorrent knows about ---------
 EXCLUDE=$(mktemp)
-sq "curl -s -m 60 -b $COOKIE '$QB_URL/api/v2/torrents/info'" \
+sq "curl -s -m 60 -H 'Cookie: $QB_SID' '$QB_URL/api/v2/torrents/info'" \
   | jqc -r '.[] | .content_path // empty' 2>/dev/null > "$EXCLUDE"
 
 TORRENT_COUNT=$(wc -l < "$EXCLUDE" | tr -d ' ')
