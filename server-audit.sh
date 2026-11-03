@@ -1200,6 +1200,12 @@ if [ -n "$_pmin" ] && [ $(( _pmin )) -gt 16 ]; then warn "CPU minimum state on A
 else ok "CPU minimum state on AC: $(( ${_pmin:-5} ))%"; fi
 _kx=$("/c/Program Files/Tailscale/tailscale.exe" status --json 2>/dev/null | python -c "import sys,json,datetime as d;e=json.load(sys.stdin)['Self'].get('KeyExpiry');print(int((d.datetime.fromisoformat(e.replace('Z','+00:00'))-d.datetime.now(d.timezone.utc)).days) if e else 'never')" 2>/dev/null)
 case "$_kx" in never) ok "Tailscale key expiry disabled" ;; ''|*[!0-9-]*) warn "could not read Tailscale key expiry" ;; *) if [ "$_kx" -lt 30 ]; then fail "Tailscale node key expires in $_kx days - disable key expiry in the admin console or remote access dies"; else warn "Tailscale node key expires in $_kx days (disable key expiry in the admin console)"; fi ;; esac
+# 2026-11-03 audit: D:\Media is excluded from Defender (scanning video over the flaky USB bridge
+# is too heavy), so nothing scans torrent payloads. A media tree never needs executables, scripts
+# or archives: any that appear are flagged here with their paths so they can be scanned by hand.
+_mx=$(find /d/Media/torrents /d/Media/library -type f \( -iname '*.exe' -o -iname '*.scr' -o -iname '*.bat' -o -iname '*.cmd' -o -iname '*.lnk' -o -iname '*.vbs' -o -iname '*.js' -o -iname '*.ps1' -o -iname '*.msi' -o -iname '*.com' -o -iname '*.zip' -o -iname '*.rar' \) 2>/dev/null)
+if [ -z "$_mx" ]; then ok "no executables, scripts or archives in D:\Media (Defender excludes that tree)"
+else warn "$(printf '%s\n' "$_mx" | wc -l) executable/script/archive file(s) in D:\Media, which Defender skips - scan: $(printf '%s\n' "$_mx" | head -3 | tr '\n' ' ')"; fi
 
 _emit "============================================================"
 # run-job.ps1 scrapes the last line matching SUMMARY for its status text and
