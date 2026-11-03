@@ -74,3 +74,7 @@ secrets.env
 # Local archive of retired stacks and old copies (it holds a retired .env). The allowlist
 # above would let its *.sh/*.yml back in; this repo is public, so the whole tree stays out.
 archive/
+
+# Generated every night by update-audit.sh (a list of pending pulls); tracking it left the
+# tree dirty after every run. Its generator is tracked; the output is not (2026-11-03).
+update-audit-staged.sh
