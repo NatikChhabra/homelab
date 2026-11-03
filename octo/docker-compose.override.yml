@@ -13,7 +13,8 @@
 services:
   octo:
     restart: always
-    mem_limit: 768m
+    # 1g since 2026-11-03: it idled at 81% of 768m (audit pass 2).
+    mem_limit: 1g
     networks: [default, navidrome_default]   # reaches http://navidrome:4533
 
   yt-dlp-shim:
