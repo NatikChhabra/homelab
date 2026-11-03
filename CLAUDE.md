@@ -59,9 +59,13 @@ physical disk from the live data.
 - `Stacks/vaultwarden/` — password manager.
 - `Stacks/vikunja/` — task manager.
 - `Stacks/server-room/` — glances host-metrics container.
+- `Stacks/adguard/` — AdGuard Home (DNS for every device; 53 tcp/udp, UI on 3080).
+- `Stacks/immich/` — photos (owner's rule: do not connect to or poke Immich during audits).
+- `Stacks/navidrome/` — music server (4533); `Stacks/octo/` — Octo proxy, slskd, yt-dlp-shim (see Octo below).
+- `Stacks/actual/` — Actual budget; `Stacks/portainer/` — Portainer (9443).
 
-Note: AdGuard, Immich, Traccar have data dirs at top level but **no** `docker-compose.yml` under
-`Stacks/` — provisioned/run elsewhere. Don't assume a compose file exists for them without checking.
+Note (2026-11-03): AdGuard and Immich DO have compose files under `Stacks/` now. Traccar has a
+data dir only and no stack.
 
 Config conventions:
 - Containers use `PUID=1000`, `PGID=1000`, `TZ=Asia/Kolkata` where applicable (linuxserver.io images).
@@ -92,7 +96,8 @@ After editing `docker-compose.yml`, apply with `docker compose up -d` in that st
 - Ports in use (avoid collisions): 8095 (filebrowser), 7575 (homarr), 61208 (glances),
   8080/6881 (qbittorrent), 9696 (prowlarr), 8989 (sonarr), 7878 (radarr), 6767 (bazarr,
   login required), 8096 (jellyfin), 5055 (jellyseerr), 3001 (uptime-kuma), 3456 (vikunja),
-  2283 (immich), 9443 (portainer). Host-only since 2026-11-01:
+  2283 (immich), 9443 (portainer), 4533 (navidrome), 53 tcp/udp + 3080 (adguard DNS + UI),
+  22 (Windows OpenSSH server). Host-only since 2026-11-01:
   8222 (vaultwarden, reached via Tailscale serve HTTPS); 8191 flaresolverr has no host port.
   Host-only since 2026-11-02: 5006 (actual budget, Tailscale serve HTTPS on :5006; data
   C:\ServerData\Actual, in backup BIND_DIRS, Kuma monitor + Homarr tile).
@@ -104,9 +109,15 @@ After editing `docker-compose.yml`, apply with `docker compose up -d` in that st
   Discovery (2026-11-02): Explo RETIRED (archive/explo-retired-20261102). scripts/lb-discovery.py (task
   "ServerData - LB Discovery" 06:30 via run-job.ps1, Kuma push KUMA_PUSH_LB_DISCOVERY) uploads ListenBrainz
   Weekly Exploration to Octo Imports as "Discover Weekly" (keep playlist + fetch FLAC-first). Daily list =
-  Octo "Your Radio". Octo holds the LB token; LibraryActions UpgradePerWeek=70 auto-upgrades lossy songs.
-- `homarr` compose has hardcoded `SECRET_ENCRYPTION_KEY`; `vikunja` has placeholder
-  `YOUR-LAPTOP-IP` in `VIKUNJA_SERVICE_PUBLICURL` — environment-specific, not templates.
+  Octo "Your Radio". Octo holds the LB token. LibraryActions UpgradePerWeek is 0 (PAUSED 2026-11-03: 13 'upgrades'
+  were different songs and were reverted from .octo-trash; Octo's DB still lists them as upgraded).
+  Do not raise it again without a DryRun pass and an exclusion for those 13.
+  Phone (2026-11-03): the owner uses the Octo Android app only (Symfonium uninstalled). It skips
+  read-only smart playlists, so scripts/offline-playlists.py (task "ServerData - Offline Playlists",
+  every 2 min, Kuma push KUMA_PUSH_OFFLINE_PLAYLISTS) keeps a plain "Everything" playlist equal to
+  the library; the phone keeps it downloaded. Favourites download via Octo's Keep Liked setting.
+- `homarr` SECRET_ENCRYPTION_KEY and `vikunja` VIKUNJA_SERVICE_PUBLICURL come from each stack's
+  gitignored `.env` since 2026-11-01 (they used to be hardcoded in the compose files).
 - Don't delete/rewrite files under app data directories — live application state.
 
 **Session hygiene:**
@@ -142,9 +153,14 @@ After editing `docker-compose.yml`, apply with `docker compose up -d` in that st
 - Report a leak as a **location plus a short hash** (`sha256:a3f1...`), never a value.
 - Verify a secret exists **by count**: `grep -c "^KEY=" file` must return `1`.
 - Run `scan-secrets.sh` before writing **any** report.
-- Reports go to **repo root**. Never `C:/ServerData/Sync/` — it is HTTP-served on port 8095.
+- Reports: the OWNER'S standing rule wins (2026-10-25, restated 2026-11-03): publish the report as a
+  claude.ai Artifact AND put a copy in `C:/ServerData/Sync/` (Filebrowser :8095, login required,
+  LAN/Tailscale only). Because that folder is HTTP-served, run `scripts/scan-secrets.sh` on the
+  report first and never put a secret, key, token or session value in it.
 - Secrets live only in `secrets.env`: gitignored, ACL-restricted to owner/SYSTEM/Administrators.
-- Never commit a `.env`. Verify with `git ls-files | grep -i "secret|\.env"` → empty.
+- Never commit a `.env`. Verify with
+  `git ls-files | grep -iE 'secret|\.env' | grep -vE '\.env\.example$|scan-secrets\.sh$'` → empty.
+  (The old form without -E treated `|` literally and could never fail.)
 
 ---
 
