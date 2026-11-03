@@ -312,9 +312,28 @@ try {
     # 5.1 turns any line the bash job writes to stderr into a terminating error,
     # so a job that merely logged a warning was aborted mid-run. Native stderr is
     # data here, not an exception: relax the preference just for this call.
+    #
+    # 2026-11-03: the job runs as a child process with a deadline of $Def.Timeout
+    # seconds. Before this, Timeout only aged the lock file: a hung shrink-library
+    # encode ran until Task Scheduler's 6 h limit killed THIS script, so no status
+    # file, no Kuma 'down' and no event were written -- the failure was invisible
+    # and Mount Watchdog took the blame. On the deadline the whole process tree is
+    # killed and the run is recorded as exit 124 (the coreutils timeout code).
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $output = & $BashExe $Def.Script 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $prevEAP }
-    $exitCode = $LASTEXITCODE
+    $outFile = "$RunLog.out"
+    try {
+        $proc = Start-Process -FilePath $BashExe -ArgumentList "-c `"'$($Def.Script)' 2>&1`"" `
+                    -NoNewWindow -PassThru -RedirectStandardOutput $outFile
+        $null = $proc.Handle   # keeps ExitCode readable after the process ends
+        $timedOut = -not $proc.WaitForExit([int]$Def.Timeout * 1000)
+        if ($timedOut) {
+            & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null
+            $proc.WaitForExit(30000) | Out-Null
+        }
+        $output = @(if (Test-Path $outFile) { Get-Content -Path $outFile -Encoding UTF8 })
+        Remove-Item $outFile -Force -ErrorAction SilentlyContinue
+    } finally { $ErrorActionPreference = $prevEAP }
+    if ($timedOut) { $exitCode = 124 } else { $exitCode = $proc.ExitCode }
     if ($null -eq $exitCode) { $exitCode = 0 }
     $output | Out-File -FilePath $RunLog -Append -Encoding utf8
 
@@ -324,6 +343,7 @@ try {
     $summaryLine = $output | Where-Object { $_ -match 'SUMMARY' } | Select-Object -Last 1
     if ($summaryLine) { $summary = ([string]$summaryLine -replace '^\S+\s+', '').Trim() }
     if (-not $summary) { $summary = "exit $exitCode" }
+    if ($timedOut) { $summary = "TIMEOUT after $($Def.Timeout) s, process tree killed. $summary" }
 }
 catch {
     $exitCode = 99
