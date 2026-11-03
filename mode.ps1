@@ -76,7 +76,8 @@ if ($Mode -eq 'Server') {
     # college work: stop its script and the kiosk Edge profile (2026-11-01).
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | ? CommandLine -match 'control-room\.ps1' | % { Stop-Process -Id $_.ProcessId -Force }
     Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ? CommandLine -match 'ServerData.Kiosk.edge-profile' | % { Stop-Process -Id $_.ProcessId -Force -ea 0 }
-    $serverTasks | % { Disable-ScheduledTask -InputObject $_ | Out-Null }
+    # The mount watchdog stays on: navidrome keeps running in College mode and needs its D: mount watched.
+    $serverTasks | ? TaskName -ne 'ServerData - Mount Watchdog' | % { Disable-ScheduledTask -InputObject $_ | Out-Null }
     Set-ItemProperty $winlogon AutoAdminLogon '0'   # stolen laptop must not boot to an open desktop
     # DNS before AdGuard goes down, or there is a window with no resolver at all
     $nics | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
@@ -85,7 +86,13 @@ if ($Mode -eq 'Server') {
     # (2026-11-02). There, use AdGuard's public DNS (still ad-free). Away from home
     # the network's own DNS stays, so captive portals keep working.
     $mine = @((Get-NetIPAddress -AddressFamily IPv4).IPAddress) + '127.0.0.1'
+    # Only a fixed-IP card is pinned: a pinned DHCP Wi-Fi card kept these servers at college and broke its
+    # login page (2026-11-03 check). Wi-Fi is pinned only when there is no Ethernet to carry home lookups.
+    $ethUp = $nics | ? { $_.Name -match 'Ethernet' -and $_.Status -eq 'Up' }
     $nics | % {
+        $dhcp = (Get-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ea 0).Dhcp -eq 'Enabled'
+        if ($dhcp -and $ethUp) { return }
+        if ($dhcp) { Log "WARN no Ethernet: pinned DNS on $($_.Name); it stays pinned if this laptop leaves home in College mode" }
         $s = (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses
         if (-not $s -or ($s | ? { $_ -in $mine })) { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses '94.140.14.14','94.140.15.15' }
     }
