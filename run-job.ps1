@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('rolling-window', 'update-audit', 'orphan-cleanup', 'server-audit', 'backup-volumes', 'shrink-library', 'lb-discovery', 'music-dupe-guard')]
+    [ValidateSet('rolling-window', 'update-audit', 'orphan-cleanup', 'server-audit', 'backup-volumes', 'shrink-library', 'lb-discovery', 'music-dupe-guard', 'offline-playlists')]
     [string]$Job
 )
 
@@ -129,6 +129,12 @@ $Jobs = @{
         PushTokenName = 'KUMA_PUSH_MUSIC_DUPE_GUARD'
         Env       = @{}
         Timeout   = 600
+    }
+    'offline-playlists' = @{
+        Script    = '/c/ServerData/Stacks/scripts/offline-playlists.sh'   # phone's Everything + Liked Songs playlists (2026-11-03)
+        PushTokenName = 'KUMA_PUSH_OFFLINE_PLAYLISTS'
+        Env       = @{}
+        Timeout   = 300
     }
     'lb-discovery' = @{
         Script    = '/c/ServerData/Stacks/scripts/lb-discovery.sh'   # ListenBrainz Weekly -> Octo (replaced Explo 2026-11-02)
