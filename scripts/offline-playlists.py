@@ -52,6 +52,11 @@ def sync(name, want, playlists):
         return f'{name} {len(want)} songs, unchanged'
     change = f'{len(have)} -> {len(want)} songs (+{len(set(want) - set(have))} -{len(set(have) - set(want))})'
     print(f'{name}: {change}')
+    gone = len(set(have) - set(want))
+    # A half-scanned library (USB drop mid-scan) still has 50+ songs; the phone would then delete
+    # everything missing from it. Removing more than 10% at once needs ALLOW_BIG_DROP=1 (2026-11-03).
+    if gone > max(5, len(have) // 10) and os.environ.get('ALLOW_BIG_DROP') != '1':
+        sys.exit(f'{name}: refusing to remove {gone} of {len(have)} songs at once (set ALLOW_BIG_DROP=1 if intended)')
     if not DRY:
         call('createPlaylist', [('playlistId', pid)] + [('songId', i) for i in want])   # replaces the songs, same id
     return f'{name} {change}'
