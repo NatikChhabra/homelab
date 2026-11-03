@@ -48,7 +48,6 @@ $StacksRoot = 'C:\ServerData\Stacks'
 $Stacks = @(
     'adguard'      # FIRST: DNS for the whole tailnet. Nothing else matters if
                    # the house cannot resolve a name.
-    'jarvis'       # SECOND: the voice loop. The prime directive.
     'homarr', 'portainer', 'vaultwarden', 'uptime-kuma'
     'streaming', 'immich', 'vikunja', 'navidrome', 'filebrowser', 'server-room'
 )
@@ -103,7 +102,7 @@ if (-not (Wait-Engine -TimeoutSec 420)) {
     Log 'FATAL  Docker Desktop runs in the INTERACTIVE session and cannot be'
     Log 'FATAL  started from here. Someone must open Docker Desktop on the'
     Log 'FATAL  desktop. EVERY CONTAINER IS DOWN UNTIL THEN, INCLUDING ADGUARD'
-    Log 'FATAL  (tailnet DNS) AND THE JARVIS VOICE LOOP.'
+    Log 'FATAL  (tailnet DNS).'
     exit 2
 }
 Log 'engine is back.'
@@ -125,7 +124,7 @@ Log ("containers running after: {0} (was {1})" -f $after.Count, $before.Count)
 $missing = $before | Where-Object { $_ -notin $after }
 if ($missing) { $missing | ForEach-Object { Log "  MISSING $_" } } else { Log '  nothing missing' }
 
-foreach ($critical in @('adguardhome', 'jarvis-voice', 'jarvis-ollama')) {
+foreach ($critical in @('adguardhome')) {
     $st = & docker inspect -f '{{.State.Status}}' $critical 2>$null
     if ($st -eq 'running') { Log "  OK   $critical is running" }
     else { Log "  FAIL $critical is '$st' - THIS IS THE ONE THAT MATTERS" }
