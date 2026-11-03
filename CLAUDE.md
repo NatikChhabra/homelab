@@ -229,6 +229,13 @@ gitignored path, force-add it in the same breath.
   `docker pull`.
 - **Modern Standby** has caused ~4h43m outages. It is the largest single source of downtime
   (see `keep-awake.ps1` and audit section 20).
+- **D: (media) sits on a Realtek RTL9201 UAS bridge** (USB VID_0BDA&PID_9201). It drops in
+  short bursts under load; the disk itself is healthy (0 read errors). A new port and a new
+  enclosure (2026-11-03) did not help, and the owner chose to leave it. Each dead mount makes
+  mount-watchdog restart Docker Desktop, which restarts every container, AdGuard included
+  (~2 min of no family DNS). Untried option: force the USB mass-storage (BOT) driver instead of UAS.
+- `mount-watchdog.log` lines before `2026-11-03T09:15:32Z` are **local time (IST) wrongly
+  marked Z**; from that line on they are true UTC. Subtract 5:30 from the old ones.
 
 ---
 
