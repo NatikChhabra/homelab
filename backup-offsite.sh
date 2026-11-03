@@ -37,8 +37,11 @@
 #   3. bash backup-offsite.sh --test
 #
 # Free tiers as of 2026-07: Backblaze B2 10GB, Google Drive 15GB, OneDrive 5GB.
-# One full local set is ~741MB, so KEEP_DAYS=7 lands near 5GB and fits any of
-# them without paying.
+# Sizing (re-measured 2026-11-03): one full local set is now ~3.3 GB, not the
+# ~741MB of July -- bind-Sync 1.4 GB, bind-Immich 0.84 GB, navidrome_data 0.35 GB.
+# KEEP_DAYS=7 would be ~23 GB, more than any free tier above. Before enabling,
+# either keep 2-3 days, or leave bind-Sync and bind-Immich out of the daily
+# history (they change slowly) and copy them weekly.
 # ============================================================================
 
 set -uo pipefail
