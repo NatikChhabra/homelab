@@ -3,7 +3,16 @@ services:
     image: vaultwarden/server:latest
     container_name: vaultwardem-vaultwarden-1
     restart: always
+    # 2026-11-01 audit: single-user vault; open sign-ups let anyone on the LAN or
+    # tailnet create an account. The existing account is unaffected.
+    environment:
+      - SIGNUPS_ALLOWED=false
+      - INVITATIONS_ALLOWED=false
+      - DOMAIN=https://arjun-rajput.tail971fea.ts.net
+    # Host-only since 2026-11-01: the only way in is Tailscale serve (HTTPS) ->
+    # 127.0.0.1:8222. Bitwarden clients need HTTPS anyway, so the plain-HTTP LAN
+    # port served nobody and only exposed the login page unencrypted.
     ports:
-      - "8222:80"
+      - "127.0.0.1:8222:80"
     volumes:
       - C:/ServerData/Vaultwarden:/data
