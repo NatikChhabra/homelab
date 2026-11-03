@@ -43,16 +43,14 @@ while IFS= read -r k; do
   PREFIX="${v:0:8}"
 
   # Check full value match
-  if grep -qF -f <(printf '%s
-' "$v") "$TARGET"; then
+  if grep -qF -f <(printf '%s\n' "$v") "$TARGET"; then
     echo "LEAK: ${k} full value in ${TARGET} (fingerprint:${FINGERPRINT})"
     COUNT=$((COUNT + 1))
     FAIL=1
   fi
 
   # Check 8-char prefix match (catches "redacted" patterns that leaked the prefix)
-  if [ "${#v}" -ge 8 ] && grep -qF -f <(printf '%s
-' "$PREFIX") "$TARGET"; then
+  if [ "${#v}" -ge 8 ] && grep -qF -f <(printf '%s\n' "$PREFIX") "$TARGET"; then
     # 2026-11-03: this line used to echo the 8-char prefix itself -- exactly the leak CLAUDE.md bans
     echo "PARTIAL LEAK: ${k} first 8 chars in ${TARGET} (fingerprint:${FINGERPRINT})"
     COUNT=$((COUNT + 1))
