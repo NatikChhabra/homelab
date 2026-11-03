@@ -275,7 +275,7 @@ for cname in $CONTAINERS; do
         STAGED_ANY=true
       else
         log "    -> NOT staged: container has no compose project labels (started outside compose)."
-        log "       Update it by hand; see CLAUDE.md note about AdGuard/Immich/Traccar."
+        log "       Update it by hand; see CLAUDE.md note about AdGuard/Immich."
       fi
       [ "$bump" = "PATCH" ] && N_PATCH=$((N_PATCH+1)) || N_MINOR=$((N_MINOR+1))
       ;;

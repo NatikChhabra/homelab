@@ -46,7 +46,7 @@ SKIP_RE='^(immich_model-cache|wger_wger_static|[0-9a-f]{64})$'
 # this script exists to hold.
 # Sync added 2026-11-01: the FileBrowser share (incl. "Important information_")
 # had no backup at all.
-BIND_DIRS="Vaultwarden AdGuard Traccar Immich Vikunja Navidrome Sync Actual Octo"
+BIND_DIRS="Vaultwarden AdGuard Immich Vikunja Navidrome Sync Actual Octo"   # Traccar dropped 2026-11-03 (retired; data moved to Backups/retired-apps-2026-11-03)
 # Regenerable bulk left out of the bind tars (2026-11-01 audit; ~60% of the store):
 # AdGuard query logs (stats + conf are kept), Immich thumbnails/transcodes (Immich
 # rebuilds them from the originals).
