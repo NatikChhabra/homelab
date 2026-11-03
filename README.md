@@ -252,6 +252,38 @@ holds no Docker entry at all. Use `bash docker-pull.sh <image>`, which asks the
 daemon to pull over its own API. The daemon is fine; only the CLI's credential
 path is broken.
 
+## Restoring from a backup
+
+Nightly archives live in `D:\Backups` for 14 days (`backup-volumes.sh`, 04:00):
+
+| Archive | What it holds |
+|---|---|
+| `<volume>_<YYYYMMDD-HHMMSS>.tar.gz` | one named Docker volume |
+| `bind-<dir>_<stamp>.tar.gz` | one app folder under `C:\ServerData` (bind mount) |
+| `stacks-config_<stamp>.tar.gz` | every compose file, script and `CLAUDE.md` |
+
+Always stop the app first, and copy the current data aside before overwriting it.
+
+**A named volume** (example: `sonarr_config`):
+
+```bash
+cd /c/ServerData/Stacks/streaming && docker compose stop sonarr
+MSYS_NO_PATHCONV=1 docker run --rm -v sonarr_config:/t -v /d/Backups:/b valkey/valkey:9 \
+  sh -c 'cd /t && tar -xzf /b/sonarr_config_<stamp>.tar.gz'
+docker compose start sonarr
+```
+
+**An app folder (bind mount):** `tar -xzf /d/Backups/bind-<dir>_<stamp>.tar.gz -C /c/ServerData`, with the app stopped.
+
+**Immich's database: never from its volume archive.** That tar is taken while Postgres
+runs, so it is not a consistent copy. Restore from Immich's own nightly dump in
+`C:\ServerData\Immich\backups\immich-db-backup-*.sql.gz`, using Immich's documented
+database-restore steps (fresh database volume, then load the dump with `psql`).
+Photos themselves are files under `C:\ServerData\Immich` and need no database step.
+
+The restore test in the nightly run only extracts `sonarr_config` into a temp folder,
+so a real restore of anything else is untested until you do it.
+
 ## Working on this
 
 Compose files are the source of truth for a service's ports, volumes and
