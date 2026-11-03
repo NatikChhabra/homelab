@@ -42,3 +42,12 @@ services:
       - "53:53/tcp"
       - "3080:80/tcp"
     restart: always
+    # 2026-11-01 audit: give Docker a real liveness signal (was "health: none").
+    # DNS answering is checked separately every minute by Uptime Kuma's
+    # 'AdGuard DNS (family path)' monitor; this one catches a hung process.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/login.html"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

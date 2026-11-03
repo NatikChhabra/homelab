@@ -31,6 +31,12 @@ services:
     image: ghcr.io/immich-app/immich-machine-learning:release
     container_name: immich-immich-machine-learning-1
     restart: always
+    # 2026-11-01: capped after an ENOMEM burst. Re-indexing every photo with
+    # SigLIP2 while face detection ran pushed the WSL VM into swap and the API
+    # started failing writes. AdGuard (DNS for the whole house) shares that VM,
+    # so the ML box must never be able to starve it: at the cap only this
+    # container restarts. Idle it holds ~1.2 GB, a busy job ~2.5 GB.
+    mem_limit: 3g
     volumes:
       - model-cache:/cache
 

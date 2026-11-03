@@ -29,6 +29,8 @@ services:
       - adguard_default
       - portainer_default
       - navidrome_default
+      - octo_default     # 2026-11-02
+      - actual_default   # 2026-11-02
 
 volumes:
   kuma_data:
@@ -49,6 +51,10 @@ networks:
   portainer_default:
     external: true
   navidrome_default:
+    external: true
+  actual_default:
+    external: true
+  octo_default:
     external: true
   streaming_default:
     external: true

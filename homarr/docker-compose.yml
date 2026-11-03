@@ -42,16 +42,8 @@ services:
       - adguard_default
       - portainer_default
       - navidrome_default
-      # Added 2026-08-08 with the JARVIS tile. The jarvis stack declares its own
-      # network key, so the name is jarvis_jarvis, not jarvis_default.
-      - jarvis_jarvis
-      # Added 2026-09-09 with the Minecraft tile.
-      # ORDERING TRAP: this network only exists once the minecraft stack has
-      # been started at least once. Running `docker compose up -d` here before
-      # that fails with "network minecraft_default not found" and takes the
-      # DASHBOARD down -- the one place you would look to find out what broke.
-      # Start Stacks/minecraft first, then recreate homarr. Never the reverse.
-      - minecraft_default
+      - octo_default     # 2026-11-02
+      - actual_default   # 2026-11-02, Actual Budget tile ping
 
 volumes:
   homarr_data:
@@ -78,7 +70,7 @@ networks:
     external: true
   navidrome_default:
     external: true
-  jarvis_jarvis:
+  actual_default:
     external: true
-  minecraft_default:
+  octo_default:
     external: true
