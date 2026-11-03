@@ -67,7 +67,7 @@ physical disk from the live data.
 - `Stacks/actual/` — Actual budget; `Stacks/portainer/` — Portainer (9443).
 
 Note (2026-11-03): AdGuard and Immich DO have compose files under `Stacks/` now. Traccar, Cleanuparr,
-Maintainerr and Tiramisu are retired; their data folders are in Backupsetired-apps-2026-11-03.
+Maintainerr and Tiramisu are retired; their data folders are in Backups/retired-apps-2026-11-03.
 
 Config conventions:
 - Containers use `PUID=1000`, `PGID=1000`, `TZ=Asia/Kolkata` where applicable (linuxserver.io images).
