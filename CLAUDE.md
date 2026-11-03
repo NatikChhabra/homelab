@@ -234,6 +234,11 @@ gitignored path, force-add it in the same breath.
   enclosure (2026-11-03) did not help, and the owner chose to leave it. Each dead mount makes
   mount-watchdog restart Docker Desktop, which restarts every container, AdGuard included
   (~2 min of no family DNS). Untried option: force the USB mass-storage (BOT) driver instead of UAS.
+- **Crashes:** one blue screen in 120 days (0xA, 2026-11-02 11:01 IST, minidump
+  C:\Windows\Minidump\110226-13390-01.dmp): `!analyze` names only nt!RtlpxVirtualUnwind in
+  svchost, no third-party driver. Every other unexpected restart has bugcheck 0 (power/sleep).
+  WinDbg is installed (winget Microsoft.WinDbg; kd.exe under its WindowsApps folder\amd64). If a
+  second bugcheck appears, compare the two and run Windows Memory Diagnostic.
 - `mount-watchdog.log` lines before `2026-11-03T09:15:32Z` are **local time (IST) wrongly
   marked Z**; from that line on they are true UTC. Subtract 5:30 from the old ones.
 
