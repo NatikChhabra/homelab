@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# offline-playlists.py -- keep the two playlists the phone keeps downloaded in step with the library.
+# offline-playlists.py -- keep the phone's offline playlist in step with the library.
 #
 # Added 2026-11-03; runs every 2 min (a no-op unless something changed), so the phone's
 # Settings > Sync now is the only button needed. The Octo phone app downloads a playlist for
-# offline ("Keep downloaded") but skips read-only smart playlists, so these are plain
-# playlists this job rewrites:
+# offline ("Keep downloaded") but skips read-only smart playlists, so this is a plain
+# playlist this job rewrites:
 #   - "Everything"  = every song in the library, newest first. Kept downloaded on the phone, so a
 #                     new song lands on the phone at its next sync (how Symfonium worked).
-#   - "Liked Songs" = the favourites, newest first. Pinned to Octo's Home so they are easy to see.
-# A playlist is only rewritten when its songs or order changed, and keeps its id (the phone's
+# Favourites need no playlist: Octo shows them under Library > Favorites and keeps them
+# downloaded itself ("Keep Liked songs downloaded"). A "Liked Songs" playlist existed for
+# an hour on 2026-11-03 and was removed at the owner's request.
+# The playlist is only rewritten when its songs or order changed, and keeps its id (the phone's
 # Keep downloaded switch is tied to the id). DRY_RUN=1 reports only. Run through scripts/run-py.sh.
 import hashlib, json, os, secrets, sys, urllib.parse, urllib.request
 
@@ -60,11 +62,8 @@ def main():
     if len(songs) < 50:   # a half-mounted music drive must not empty the phone's downloads
         sys.exit(f'only {len(songs)} songs in the library -- refusing to rewrite playlists')
     everything = [s['id'] for s in sorted(songs, key=lambda s: s.get('created', ''), reverse=True)]
-    liked = call('getStarred2').get('starred2', {}).get('song', [])
-    liked = [s['id'] for s in sorted(liked, key=lambda s: s.get('starred', ''), reverse=True)]
     playlists = call('getPlaylists').get('playlists', {}).get('playlist', [])
     sync('Everything', everything, playlists)
-    sync('Liked Songs', liked, playlists)
 
 
 if __name__ == '__main__':

@@ -131,7 +131,7 @@ $Jobs = @{
         Timeout   = 600
     }
     'offline-playlists' = @{
-        Script    = '/c/ServerData/Stacks/scripts/offline-playlists.sh'   # phone's Everything + Liked Songs playlists (2026-11-03)
+        Script    = '/c/ServerData/Stacks/scripts/offline-playlists.sh'   # phone's offline Everything playlist (2026-11-03)
         PushTokenName = 'KUMA_PUSH_OFFLINE_PLAYLISTS'
         Env       = @{}
         Timeout   = 300
