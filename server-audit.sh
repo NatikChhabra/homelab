@@ -53,7 +53,7 @@ sec()  { _emit ""; _emit "== $* =="; }
 
 sonarr()  { docker exec sonarr sh -c "curl -s -m 20 -H 'X-Api-Key: $SONARR_KEY' 'http://localhost:8989$1'" 2>/dev/null; }
 radarr_k() { docker exec radarr sh -c "sed -n 's|.*<ApiKey>\(.*\)</ApiKey>.*|\1|p' /config/config.xml" 2>/dev/null | tr -d '\r'; }
-jf()      { docker exec jellyfin sh -c "curl -s -m 20 -H 'X-Emby-Token: $JELLYFIN_KEY' 'http://localhost:8096$1'" 2>/dev/null; }
+jf()      { docker exec jellyfin sh -c "curl -s -m 20 -H 'Authorization: MediaBrowser Token=$JELLYFIN_KEY' 'http://localhost:8096$1'" 2>/dev/null; }
 jqs()     { docker exec -i sonarr jq "$@" 2>/dev/null; }
 
 _emit "============================================================"
@@ -64,7 +64,7 @@ _emit "============================================================"
 sec "1. Containers"
 # Incident: nothing here yet, but a silently exited container is the cheapest
 # possible thing to miss.
-EXPECTED="qbittorrent prowlarr flaresolverr sonarr radarr bazarr jellyfin jellyseerr maintainerr cleanuparr"
+EXPECTED="qbittorrent prowlarr flaresolverr sonarr radarr bazarr jellyfin jellyseerr warp"
 for c in $EXPECTED; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
   if [ "$st" != "running" ]; then
@@ -93,15 +93,16 @@ check_port() {  # $1=port $2=label $3=acceptable codes (space separated)
 }
 check_port 8080  qbittorrent "200 401 403"
 check_port 9696  prowlarr    "200 302"
-check_port 8191  flaresolverr "200 405"
+# FlareSolverr has no host port since 2026-11-01 (it was unauthenticated on the
+# LAN); check it the way Prowlarr actually reaches it, over the compose network.
+fs=$(MSYS_NO_PATHCONV=1 docker exec prowlarr sh -c 'curl -s -o /dev/null -m 10 -w %{http_code} http://flaresolverr:8191/' 2>/dev/null)
+case "$fs" in 200|405) ok "flaresolverr (via prowlarr -> flaresolverr:8191) responds $fs" ;; *) fail "flaresolverr unreachable from prowlarr (got '$fs')" ;; esac
 check_port 8989  sonarr      "200 302"
 check_port 7878  radarr      "200 302"
 check_port 6767  bazarr      "200 302"
 check_port 8096  jellyfin    "200 302"
 check_port 5055  jellyseerr  "200 307 302"
-check_port 6246  maintainerr "200 302"
-check_port 11011 cleanuparr  "200 302"
-check_port 7575  homarr      "200 302"
+check_port 7575  homarr      "200 302 307"   # v2.10 redirects to /auth/login with 307
 check_port 3001  uptime-kuma "200 302"
 
 # ---------------------------------------------------------------------------
@@ -175,8 +176,21 @@ QB=$(docker exec qbittorrent sh -c "
 if printf '%s' "$QB" | grep -q dht_nodes; then
   dht=$(printf '%s' "$QB" | jqs -r '.dht_nodes')
   cs=$(printf '%s' "$QB" | jqs -r '.connection_status')
-  [ "$cs" = "connected" ] && ok "qBittorrent connection_status=connected" || fail "qBittorrent connection_status=$cs"
-  if [ "${dht:-0}" -lt "$MIN_DHT_NODES" ]; then
+  # 2026-10-25: "firewalled" only means no inbound connections (no port
+  # forward on the JioFiber router). A test torrent still pulled 10.9 MB/s from
+  # 42 seeds in that state, so it is a warning, not an outage.
+  case "$cs" in
+    connected)  ok "qBittorrent connection_status=connected" ;;
+    firewalled) warn "qBittorrent is firewalled (no inbound peers) - downloads still work; forward port 6881 on the router to fix" ;;
+    *)          fail "qBittorrent connection_status=$cs" ;;
+  esac
+  # 2026-10-25: libtorrent only grows its DHT table while a torrent is active.
+  # An idle client sat at 0 nodes for hours, then reached 140 within 30 s of
+  # adding a torrent -- so low DHT with nothing active is not a fault.
+  act=$(docker exec qbittorrent sh -c "curl -s -m 15 -b /tmp/.audit_ck 'http://localhost:8080/api/v2/torrents/info?filter=active'" 2>/dev/null | jqs -r 'length' 2>/dev/null)
+  if [ "${dht:-0}" -lt "$MIN_DHT_NODES" ] && [ "${act:-0}" -eq 0 ]; then
+    ok "DHT idle ($dht nodes, no active torrents)"
+  elif [ "${dht:-0}" -lt "$MIN_DHT_NODES" ]; then
     fail "DHT has only ${dht} nodes (<$MIN_DHT_NODES) - peer discovery is broken, restart qbittorrent"
   else
     ok "DHT healthy ($dht nodes)"
@@ -208,22 +222,47 @@ fi
 
 # ---------------------------------------------------------------------------
 sec "7. Outbound DNS / metadata providers"
+# Added 2026-11-01: jellyfin + jellyseerr reach TMDb only through warp (Airtel
+# resets most TMDb TLS handshakes). If the tunnel drops, metadata dies quietly.
+wst=$(docker exec warp sh -c "curl -s -m 15 -x http://127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace" 2>/dev/null | sed -n 's/^warp=//p')
+[ "$wst" = "on" ] && ok "warp tunnel is up (warp=on)" || fail "warp tunnel not working (warp=${wst:-no answer}) - jellyfin/jellyseerr lose TMDb; docker restart warp"
 # Incident 2026-07-27: Jellyfin was the only *arr-family container without a
 # dns: override, so it used ISP DNS, which hijacks api.themoviedb.org to a dead
 # IP. Result: no artwork or metadata at all, while every other HTTPS call
 # worked, so it looked like a TMDb outage rather than a config gap.
-for c in sonarr radarr jellyfin jellyseerr; do
+# Sonarr/Radarr do NOT call api.themoviedb.org themselves: their lookups go to the
+# Servarr metadata services and posters come from image.tmdb.org. Probing TMDb's
+# API from them only "passed" when Airtel's intermittent SNI block happened to be
+# off (false FAIL on 2026-11-01). Test what they actually use.
+for pair in "sonarr https://skyhook.sonarr.tv/" "radarr https://api.radarr.video/v1/ping" "radarr https://image.tmdb.org/t/p/w92/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg"; do
+  set -- $pair; mc=""
+  for t in 15 30; do mc=$(docker exec "$1" sh -c "curl -s -o /dev/null -w '%{http_code}' -m $t $2" 2>/dev/null); case "$mc" in 2??|3??|404) break ;; esac; sleep 2; done
+  case "$mc" in 2??|3??|404) ok "$1 reaches ${2#https://} ($mc)" ;; *) fail "$1 cannot reach ${2#https://} (got '${mc:-none}') - metadata lookups/posters will fail" ;; esac
+done
+for c in jellyfin jellyseerr; do
   # Retried on purpose. A single probe reported a hard FAIL for Jellyfin on
   # 2026-07-28 purely because an 18GB download was saturating the link at that
   # moment -- the very next request returned 401. A transient timeout must not
   # look identical to a DNS misconfiguration, or the audit trains you to ignore
   # it. Three tries with a rising timeout; only a consistent failure is real.
   code=""
+  # 2026-11-01: on Airtel most TLS handshakes to TMDb are reset (SNI filtering),
+  # so jellyfin and jellyseerr reach it through the warp proxy. Test that path.
+  PX=""; WPX=""
+  case "$c" in jellyfin|jellyseerr) PX="-x http://warp:1080"; WPX="https_proxy=http://warp:1080" ;; esac
   for t in 15 30 45; do
-    code=$(docker exec "$c" sh -c "curl -s -o /dev/null -w '%{http_code}' -m $t https://api.themoviedb.org/3/ 2>/dev/null" 2>/dev/null)
+    code=$(docker exec "$c" sh -c "curl -s $PX -o /dev/null -w '%{http_code}' -m $t https://api.themoviedb.org/3/ 2>/dev/null" 2>/dev/null)
     case "$code" in 401|200) break ;; esac
     sleep 2
   done
+  # 2026-11-01: busybox wget in Seerr honours https_proxy only some of the time,
+  # so its raw probe failed ~40% while the app's own searches (proxy set in
+  # Settings > Network) were 3/3. Test the path users hit: Seerr's search API.
+  if [ "$c" = "jellyseerr" ] && { [ -z "$code" ] || [ "$code" = "000" ]; }; then
+    if docker exec jellyseerr sh -c 'K=$(node -e "console.log(require(\"/app/config/settings.json\").main.apiKey)"); wget -q -T 30 -O - --header "X-Api-Key: $K" "http://localhost:5055/api/v1/search?query=inception&page=1"' 2>/dev/null | grep -q '"totalResults":[1-9]'; then
+      code=200
+    fi
+  fi
   if [ -z "$code" ] || [ "$code" = "000" ]; then
     # Seerr ships wget, not curl. A 401 there surfaces as a non-zero exit with
     # "401 Unauthorized" on stderr, which still proves the host was reached.
@@ -234,7 +273,7 @@ for c in sonarr radarr jellyfin jellyseerr; do
     # before falling back to IPv4. A single blip must not read as an outage,
     # but a genuinely unreachable host still fails all three.
     for _try in 1 2 3; do
-      if docker exec "$c" sh -c "wget -q -T 15 -O /dev/null https://api.themoviedb.org/3/ 2>&1 | grep -qiE '401|Unauthorized'" 2>/dev/null; then
+      if docker exec "$c" sh -c "$WPX wget -q -T 15 -O /dev/null https://api.themoviedb.org/3/ 2>&1 | grep -qiE '401|Unauthorized'" 2>/dev/null; then
         code=401; break
       fi
       sleep 2
@@ -399,7 +438,7 @@ sec "10. Rolling window automation"
 # Incident 2026-07-27: the task exited 1 every 20 minutes for hours (season-pack
 # cancels returning 404) and nobody noticed, because a failing scheduled task is
 # invisible unless you go looking.
-for t in "ServerData - Rolling Window" "ServerData - Orphan Cleanup" "ServerData - Update Audit" "ServerData - Weekly Audit" "ServerData - Daily Backup" "ServerData - Mount Watchdog"; do
+for t in "ServerData - Rolling Window" "ServerData - Orphan Cleanup" "ServerData - Update Audit" "ServerData - Weekly Audit" "ServerData - Daily Backup" "ServerData - Mount Watchdog" "ServerData - Shrink Library" "ServerData - Immich Auto Albums"; do
   r=$(powershell.exe -NoProfile -Command "\$i=Get-ScheduledTaskInfo -TaskName '$t' -EA SilentlyContinue; if(\$i){\$i.LastTaskResult}else{'missing'}" 2>/dev/null | tr -d '\r ')
   # Windows returns status codes here, not just exit codes:
   #   267009 SCHED_S_TASK_RUNNING   - running right now (this audit is itself
@@ -506,11 +545,19 @@ else
     # ORIGINALS; immich_immich-db is only the database. Incident 2026-07-28:
     # 105 originals were lost and the database was perfectly intact, which is
     # precisely why the DB backup alone proves nothing.
-    for must in sonarr_config jellyfin_config bind-Vaultwarden immich_immich-db bind-Immich; do
-      if ls "$BK_DIR"/${must}_*.tar.gz >/dev/null 2>&1; then
-        ok "backup present: $must"
-      else
+    # bind-AdGuard / bind-Navidrome / bind-Sync added 2026-11-01 (audit: family DNS config,
+    # music DB and the FileBrowser share were not on the must-list).
+    # Freshness, not mere presence (2026-11-01): with 14-day retention a backup
+    # that stopped a week ago still "had an archive". navidrome_data added: it
+    # holds Navidrome's real DB, its own /data/backup copies and plugin stores.
+    for must in sonarr_config jellyfin_config bind-Vaultwarden immich_immich-db bind-Immich bind-AdGuard bind-Navidrome bind-Sync bind-Actual bind-Octo navidrome_data; do
+      _newest=$(ls -t "$BK_DIR"/${must}_*.tar.gz 2>/dev/null | head -1)
+      if [ -z "$_newest" ]; then
         fail "NO backup for $must - irreplaceable data is unprotected"
+      else
+        _bh=$(( ( $(date +%s) - $(stat -c %Y "$_newest") ) / 3600 ))
+        if [ "$_bh" -gt 27 ]; then fail "newest backup of $must is ${_bh} h old - the nightly backup has stopped"
+        else ok "backup fresh: $must (${_bh} h old)"; fi
       fi
     done
 
@@ -578,8 +625,7 @@ orphv=$(docker volume ls -qf dangling=true 2>/dev/null | grep -Ev '^[0-9a-f]{64}
 nov=$(printf '%s' "$orphv" | grep -c . || true)
 if [ "${nov:-0}" -gt 0 ]; then
   warn "$nov orphaned volume(s) from removed stacks (still being backed up nightly):"
-  printf '%s
-' "$orphv" | while read -r v; do
+  printf '%s\n' "$orphv" | while read -r v; do
     [ -z "$v" ] && continue
     _emit "          $v"
   done
@@ -587,7 +633,10 @@ else
   ok "no orphaned volumes"
 fi
 
-dang=$(docker images -f dangling=true -q 2>/dev/null | grep -c . || true)
+# Containerd image store lists an untagged copy of an IN-USE image as dangling
+# (seen 2026-11-02: jellyfin's own image; prune reclaims 0 B). Count only unused ones.
+used=$(docker ps -aq | xargs -r docker inspect -f '{{.Image}}' 2>/dev/null | cut -c8-19)
+dang=$(docker images -f dangling=true -q 2>/dev/null | grep -vxF -f <(printf '%s\n' $used) | grep -c . || true)
 [ "${dang:-0}" -gt 0 ] && warn "$dang dangling image(s) - reclaim with: docker image prune" || ok "no dangling images"
 
 exited=$(docker ps -aq -f status=exited 2>/dev/null | grep -c . || true)
@@ -659,7 +708,7 @@ sec "15. Non-media stacks"
 OTHER_CONTAINERS="adguardhome immich-immich-server-1 immich-database-1 immich-redis-1 \
 immich-immich-machine-learning-1 vaultwardem-vaultwarden-1 vikunja-vikunja-1 \
 filebrowser-filebrowser-1 homarr-homarr-1 uptime-kuma-uptime-kuma-1 portainer \
-glances navidrome"
+glances navidrome actual octo slskd yt-dlp-shim"
 for c in $OTHER_CONTAINERS; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
   if [ "$st" != "running" ]; then
@@ -684,6 +733,8 @@ check_port 3456  vikunja     "200 302"
 check_port 8095  filebrowser "200 302"
 check_port 61208 glances     "200 302"
 check_port 4533  navidrome   "200 302"
+check_port 5006  actual      "200 302"
+check_port 5274  octo        "200 302"
 
 # Portainer is HTTPS-only with a self-signed cert, so check_port's plain HTTP
 # probe cannot be reused here.
@@ -694,278 +745,31 @@ case " 200 302 307 " in
 esac
 
 # ---------------------------------------------------------------------------
-sec "16. JARVIS voice assistant"
-# Six containers in a dependency chain, and every one of them has a failure mode
-# that "the container is running" cannot see. A Wyoming service accepts TCP
-# connections minutes before its model has finished downloading. Ollama answers
-# HTTP 200 with an empty model list. Home Assistant answers 401 to an
-# authenticated probe forever while serving perfectly. So nothing in this
-# section is satisfied by container state -- every check makes the thing answer.
-# Incident 2026-08-09: jarvis-kokoro and jarvis-capabilities were both running in
-# production and NEITHER was in this list, so the "unlisted container" check at
-# the end of the audit flagged them as failing invisibly. Kokoro is now THE voice
-# -- if it dies, JARVIS silently falls back to the Piper voice Natik rejected,
-# which sounds like a quality regression rather than an outage. Adding a service
-# without adding it here is the exact hole this audit exists to close.
-JARVIS_CONTAINERS="jarvis-ollama jarvis-hass jarvis-whisper jarvis-piper jarvis-wake-word jarvis-voice jarvis-kokoro jarvis-capabilities jarvis-websearch jarvis-searxng"
-for c in $JARVIS_CONTAINERS; do
-  st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
-  if [ "$st" != "running" ]; then
-    fail "container $c is '${st:-missing}', expected running"
-  else
-    rc=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null)
-    hs=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$c" 2>/dev/null)
-    if [ "${rc:-0}" -gt 3 ]; then
-      warn "container $c has restarted $rc times (crash loop?)"
-    elif [ "$hs" = "unhealthy" ]; then
-      # WARN here, not FAIL, and deliberately unlike sections 1 and 15.
-      # Incident 2026-08-08: jarvis-hass reported unhealthy across 56
-      # consecutive probes while Home Assistant was serving normally, because
-      # the healthcheck curled an authenticated endpoint that answers 401 by
-      # design -- and every probe was additionally logged as a failed login,
-      # which walks HA towards banning its own healthcheck. That cost a day.
-      # The response probes below are the authority for this stack; a
-      # healthcheck that disagrees with them is a bug in the healthcheck.
-      warn "container $c reports unhealthy - check it against the response probes below before believing it"
-    else
-      ok "container $c running (restarts=$rc)"
-    fi
-  fi
-done
-
-# Incident 2026-08-08: openwakeword_data did not exist and had to be created by
-# hand. All five volumes are declared `external: true`, so compose will never
-# create one for you -- it aborts the entire stack with an error that names the
-# volume but not the fix, and the other five services never start either.
-for v in ollama_data hass_config whisper_data tts_data openwakeword_data; do
-  if docker volume inspect "$v" >/dev/null 2>&1; then
-    ok "external volume $v exists"
-  else
-    fail "external volume $v is MISSING - 'docker compose up -d' in jarvis/ will refuse to start the whole stack; create it with 'docker volume create $v'"
-  fi
-done
-
-# Wyoming is a raw TCP JSONL protocol, NOT HTTP. `curl http://localhost:10300/`
-# ALWAYS fails against it, and that failure is NOT evidence of a fault -- the
-# since-deleted api.py health endpoint did exactly that and reported all three
-# voice services as down while every one of them was fine. So this speaks the
-# real protocol: open the socket, send a `describe`, read the `info` reply.
-#
-# It counts INSTALLED MODELS rather than stopping at the handshake. These images
-# fetch their models from HuggingFace on first run, so a container listens on
-# its port for several minutes before it can actually transcribe or speak. A
-# plain port check -- which is exactly what the compose healthchecks do -- is
-# green through that entire window and green forever if the download failed.
-#
-# The probe runs inside jarvis-voice because that container already carries
-# wyoming_client.py, a Python to run it, and a route onto the jarvis network.
-# The reply is parsed IN the container on purpose: piper's `describe` is ~83KB
-# of voice metadata, and section 12 already recorded what happens when a large
-# API payload is dragged out through a shell variable.
-JARVIS_WY=$(docker exec jarvis-voice python -c '
-import asyncio, sys
-sys.path.insert(0, "/app")
-import wyoming_client as w
-
-TARGETS = [("piper", "jarvis-piper", 10200, "tts"),
-           ("whisper", "jarvis-whisper", 10300, "asr"),
-           ("openwakeword", "jarvis-wake-word", 10400, "wake")]
-
-async def main():
-    for label, host, port, kind in TARGETS:
-        try:
-            info = await w.describe(host, port, timeout=10)
-        except Exception as exc:
-            print("%s|error|0|no|%s" % (label, type(exc).__name__))
-            continue
-        if not info:
-            print("%s|no-reply|0|no|" % label)
-            continue
-        programs = info.get(kind) or []
-        installed = 0
-        wake = "no"
-        for prog in programs:
-            models = list(prog.get("models") or []) + list(prog.get("voices") or [])
-            for m in models:
-                if not m.get("installed"):
-                    continue
-                installed += 1
-                if m.get("name") == "hey_jarvis":
-                    wake = "yes"
-        names = ",".join(p.get("name", "?") for p in programs) or "-"
-        print("%s|%s|%d|%s|" % (label, names, installed, wake))
-
-asyncio.run(main())
-' 2>/dev/null | tr -d '\r')
-
-if [ -z "$JARVIS_WY" ]; then
-  fail "the Wyoming probe could not run inside jarvis-voice - piper/whisper/openwakeword are UNVERIFIED, which is not the same as healthy"
-else
-  # Read from a file, not a pipe. Section 8 records why: a `while read` on the
-  # right of a pipe runs in a subshell, so both the counters and the report
-  # buffer built inside it are silently discarded.
-  WYF=$(mktemp)
-  printf '%s\n' "$JARVIS_WY" > "$WYF"
-  while IFS='|' read -r label programs installed wake err; do
-    [ -z "${label:-}" ] && continue
-    case "$programs" in
-      error)
-        fail "$label did not answer a Wyoming describe (${err:-connection failed}) - the port is published but nothing is serving the protocol behind it" ;;
-      no-reply)
-        fail "$label accepted the connection but never sent an 'info' reply - up, listening, and not serving" ;;
-      *)
-        if [ "${installed:-0}" -lt 1 ]; then
-          fail "$label answers describe as '$programs' but has 0 INSTALLED models - the model download never finished, so it will accept audio and return nothing"
-        else
-          ok "$label answers Wyoming describe ($programs, $installed model(s) installed)"
-        fi ;;
-    esac
-    # The entire stack is built around one phrase. openWakeWord ships several
-    # pretrained wake models and only preloads whichever `--preload-model`
-    # names, so a typo in that one compose argument leaves the service
-    # completely healthy -- connected, answering describe, listening hard for
-    # "okay nabu" -- and stone deaf to its own name, with nothing anywhere
-    # reporting a fault. Assert the model by name rather than trusting the flag.
-    if [ "$label" = "openwakeword" ]; then
-      if [ "$wake" = "yes" ]; then
-        ok "openwakeword has the hey_jarvis model installed"
-      else
-        fail "openwakeword does NOT list hey_jarvis - the wake word is missing, so nothing will ever trigger; check --preload-model in jarvis/docker-compose.yml"
-      fi
-    fi
-  done < "$WYF"
-  rm -f "$WYF"
-fi
-
-# Incident 2026-08-08: the compose healthcheck curled http://localhost:8123/api/,
-# which REQUIRES a bearer token, so it returned 401 on every probe. The container
-# sat "unhealthy" through 56 consecutive probes while Home Assistant was serving
-# perfectly, and each probe was recorded as a failed login (http.ban warnings).
-# /manifest.json needs no credential at all, so a non-200 here is a genuine
-# outage rather than a missing token -- which is the whole point of probing it.
-hacode=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "http://localhost:8123/manifest.json" 2>/dev/null)
-case "$hacode" in
-  200) ok "Home Assistant answers UNAUTHENTICATED on :8123 (/manifest.json 200)" ;;
-  *)   fail "Home Assistant /manifest.json returned '$hacode', expected 200 - this endpoint needs no token, so this is a real outage and not an auth problem" ;;
-esac
-
-# A long-lived access token can be revoked from the Home Assistant UI at any
-# moment, and nothing else on this box would notice. Every voice command goes
-# through POST /api/conversation/process carrying this token: if it stops
-# authenticating, the microphone still records, the transcript still appears on
-# screen, and every command silently does nothing. Note that jarvis-voice's own
-# /api/status reports `hass_token_configured` for a token that is PRESENT, not
-# one that WORKS -- so it cannot catch this and this check is not redundant.
-if [ -n "${JARVIS_HASS_TOKEN:-}" ]; then
-  tcode=$(curl -s -o /dev/null -w '%{http_code}' -m 15 \
-          -H "Authorization: Bearer $JARVIS_HASS_TOKEN" "http://localhost:8123/api/" 2>/dev/null)
-  case "$tcode" in
-    200)     ok "JARVIS_HASS_TOKEN still authenticates against Home Assistant (/api/ 200)" ;;
-    401|403) fail "JARVIS_HASS_TOKEN is REVOKED or wrong (HTTP $tcode) - speech will transcribe fine and then do nothing at all; mint a new long-lived token in HA and update secrets.env" ;;
-    *)       fail "Home Assistant /api/ returned '$tcode' with the stored token, expected 200" ;;
-  esac
-else
-  fail "JARVIS_HASS_TOKEN is not set in $SECRETS_FILE - the voice bridge cannot execute a single command"
-fi
-
-# Two distinct failures, one endpoint. /api/tags answering proves the daemon is
-# up and says nothing about whether a model is there. ollama_data is an external
-# volume, so a volume recreated empty leaves Ollama cheerfully answering 200
-# with {"models":[]} while every conversation dies at the model-load step.
-OLL=$(curl -s -m 20 "http://localhost:11434/api/tags" 2>/dev/null)
-nmodels=$(printf '%s' "$OLL" | jqs -r '.models | length')
-case "${nmodels:-}" in
-  ''|*[!0-9]*) fail "Ollama /api/tags unreadable on :11434 - the conversation agent has no backend at all" ;;
-  0)           fail "Ollama answers but holds ZERO models - ollama_data was recreated empty; re-pull with 'docker exec jarvis-ollama ollama pull <model>'" ;;
-  *)           ok "Ollama answers /api/tags with $nmodels model(s)" ;;
-esac
-
-# ...and the model Home Assistant is actually CONFIGURED to use has to be one of
-# them. Read out of HA rather than hardcoded here: model selection for this
-# stack is still open, so a name pinned into this script would go stale and
-# start failing a perfectly healthy server. The failure this catches is the
-# mirror image of the one above -- a conversation agent pointing at a model that
-# was deleted, renamed or never pulled, which surfaces only as every single
-# spoken command erroring out with nothing else looking wrong.
-WANTED_MODEL=$(docker exec jarvis-hass python3 -c '
-import json
-try:
-    entries = json.load(open("/config/.storage/core.config_entries"))["data"]["entries"]
-except Exception:
-    raise SystemExit
-for entry in entries:
-    if entry.get("domain") != "ollama":
-        continue
-    for sub in entry.get("subentries") or []:
-        model = (sub.get("data") or {}).get("model")
-        if model:
-            print(model)
-            raise SystemExit
-' 2>/dev/null | tr -d '\r' | head -1)
-if [ -z "$WANTED_MODEL" ]; then
-  warn "no Ollama conversation agent is configured in Home Assistant - speech will transcribe but nothing will answer it"
-elif [ "${nmodels:-0}" -gt 0 ]; then
-  havem=$(printf '%s' "$OLL" | jqs -r --arg m "$WANTED_MODEL" '[.models[]?|select(.name==$m)]|length')
-  if [ "${havem:-0}" -gt 0 ]; then
-    ok "HA conversation agent model '$WANTED_MODEL' is present in Ollama"
-  else
-    fail "HA conversation agent is configured for model '$WANTED_MODEL' but Ollama does not have it - every voice command will error"
-  fi
-fi
-
-# The bridge's own view of its dependencies, which is the view the browser gets.
-# Checked IN ADDITION to the direct probes above, never instead of them: an
-# earlier version of this very endpoint reported all three voice services down
-# because it spoke HTTP at raw-TCP Wyoming ports. This endpoint agreeing with
-# the independent probes is itself part of the signal; if they ever disagree,
-# the direct probes win.
-VST=$(curl -s -m 25 "http://localhost:3100/api/status" 2>/dev/null)
-if printf '%s' "$VST" | grep -q '"whisper"'; then
-  vbad=$(printf '%s' "$VST" | jqs -r '[ to_entries[] | select(.value|type=="string") | select(.value != "ok") | "\(.key)=\(.value)" ] | join(" ")')
-  vtok=$(printf '%s' "$VST" | jqs -r '.hass_token_configured')
-  if [ -n "$vbad" ]; then
-    fail "jarvis-voice /api/status does not report every service ok: $vbad"
-  else
-    ok "jarvis-voice /api/status reports every service ok"
-  fi
-  if [ "$vtok" != "true" ]; then
-    fail "jarvis-voice has no HA token in its environment - it can hear you and cannot act; check env_file in jarvis/docker-compose.yml"
-  fi
-else
-  fail "jarvis-voice /api/status did not answer on :3100 - the browser client has no backend"
-fi
-
-# Incident 2026-08-08: the browser client requires a SECURE CONTEXT. Served over
-# plain HTTP on a tailnet IP, `navigator.mediaDevices` is undefined, so the
-# microphone dies with a bare TypeError and the page simply looks broken -- no
-# log anywhere names the real cause. `tailscale serve` on 8443 is what supplies
-# the HTTPS, so losing that one mapping silently kills voice input while all six
-# containers stay green and every check above still passes.
-#
-# Port 443 is asserted in the same breath because it is the neighbouring
-# mistake: `tailscale serve` run without an explicit port targets 443 and
-# REPLACES the handler there rather than adding to it, so a careless re-run
-# would take Vaultwarden off the tailnet. JARVIS is on 8443 specifically to
-# avoid that, and this is what proves it stayed that way.
+sec "16. Tailscale serve keeps Vaultwarden on 443"
+# `tailscale serve` run without an explicit port targets 443 and REPLACES the
+# handler there rather than adding to it, so a careless re-run takes
+# Vaultwarden off the tailnet while its container stays green and every check
+# above still passes.
 TS_EXE="/c/Program Files/Tailscale/tailscale.exe"
 if [ -x "$TS_EXE" ]; then
   TSJ=$("$TS_EXE" serve status --json 2>/dev/null)
   ts_port() { printf '%s' "$TSJ" | jqs -r --arg p "$1" \
     '.Web // {} | to_entries[] | select((.key|split(":")|last) == $p) | .value.Handlers["/"].Proxy // empty'; }
-  j8443=$(ts_port 8443)
   j443=$(ts_port 443)
-  case "$j8443" in
-    *:3100) ok "tailscale serve maps 8443 -> $j8443 (HTTPS, so getUserMedia works)" ;;
-    "")     fail "tailscale serve has NO mapping on 8443 - the JARVIS UI is not served over HTTPS, so navigator.mediaDevices is undefined and the microphone cannot start" ;;
-    *)      fail "tailscale serve 8443 points at '$j8443', expected localhost:3100 - the JARVIS UI is not behind that HTTPS mapping any more" ;;
-  esac
   case "$j443" in
-    *:8222) ok "tailscale serve still maps 443 -> $j443 (vaultwarden undisturbed)" ;;
+    *:8222) ok "tailscale serve maps 443 -> $j443 (vaultwarden)" ;;
     "")     fail "tailscale serve has NO mapping on 443 - Vaultwarden is off the tailnet" ;;
     *)      fail "tailscale serve 443 points at '$j443', expected 127.0.0.1:8222 - something displaced Vaultwarden's mapping" ;;
   esac
 else
-  warn "cannot run $TS_EXE - the JARVIS HTTPS mapping is unverified, so the microphone may be broken without any other symptom"
+  warn "cannot run $TS_EXE - the Vaultwarden HTTPS mapping on the tailnet is unverified"
+fi
+# Actual Budget (2026-11-02) needs HTTPS too; same failure shape on :5006.
+if [ -x "$TS_EXE" ]; then
+  case "$(ts_port 5006)" in
+    *:5006) ok "tailscale serve maps 5006 -> actual" ;;
+    *)      fail "tailscale serve has no 5006 -> 127.0.0.1:5006 mapping - Actual Budget unreachable from phone/PC (re-run: tailscale serve --bg --https=5006 http://127.0.0.1:5006)" ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -1179,7 +983,10 @@ fi
 # it held the three music-alexa containers until that stack was dropped on
 # 2026-07-28. Keep the mechanism: the next deliberately-dormant stack needs it,
 # and an empty list is not the same thing as no list.
-NOT_DEPLOYED=""
+# 2026-11-02: octo/docker-compose.yml is upstream verbatim; its octo-sonic (2 GB
+# "sounds alike" radio) and spotiflac profile are switched off on purpose in
+# docker-compose.override.yml (host memory).
+NOT_DEPLOYED="octo-sonic spotiflac"
 declared=$(grep -rhE '^\s*container_name:\s*\S+' /c/ServerData/Stacks/*/docker-compose.yml 2>/dev/null \
            | sed -E 's/^\s*container_name:\s*//' | tr -d '\r' | sort -u)
 missing=""; undeployed=0
@@ -1195,7 +1002,7 @@ fi
 
 unchecked=""
 for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
-  case " $EXPECTED $OTHER_CONTAINERS $JARVIS_CONTAINERS " in
+  case " $EXPECTED $OTHER_CONTAINERS " in
     *" $c "*) ;;
     *) unchecked="$unchecked $c" ;;
   esac
@@ -1225,194 +1032,7 @@ fi
 
 
 # ---------------------------------------------------------------------------
-sec "20. JARVIS intent routing and prompt"
-# Everything in this section exists because it broke on 2026-08-08/09.
-#
-# The stack can be perfectly healthy -- every container up, every Wyoming
-# service answering -- while JARVIS is quietly 80x slower than it should be and
-# confirming actions it never performed. Section 16 checks that the parts are
-# alive. This section checks that the parts are WIRED THE WAY THEY WERE BUILT.
-
-JARVIS_DIR="/c/ServerData/Stacks/jarvis"
-
-# --- the live system prompt vs the repo ------------------------------------
-# Incident 2026-08-08: the repo's jarvis-prompt.txt had the "movie, film,
-# gaming -> Movie time." line removed because script.movie_time is deliberately
-# NOT exposed to the model (exposing it would push the tool count to 18 and
-# break the tested budget). The LIVE prompt, which lives in the config entry's
-# options and not on disk, still had it. So the model kept saying "Movie time
-# activated." while script.movie_time.last_triggered stayed None -- a spoken
-# confirmation for an action that never happened, which is undetectable by the
-# person listening. The two copies drift silently and nothing else notices.
-if [ -r "$JARVIS_DIR/jarvis-prompt.txt" ]; then
-  LIVE_PROMPT=$(docker exec jarvis-hass python3 -c '
-import json
-try:
-    d = json.load(open("/config/.storage/core.config_entries", encoding="utf-8"))
-except Exception:
-    raise SystemExit(0)
-for e in d["data"]["entries"]:
-    if e.get("domain") != "ollama":
-        continue
-    for s in e.get("subentries", []):
-        if s.get("subentry_type") == "conversation":
-            print((s.get("data", {}).get("prompt") or "").strip())
-            raise SystemExit(0)
-' 2>/dev/null)
-  REPO_PROMPT=$(tr -d '\r' < "$JARVIS_DIR/jarvis-prompt.txt" | sed -e 's/[[:space:]]*$//')
-  LIVE_NORM=$(printf '%s' "$LIVE_PROMPT" | sed -e 's/[[:space:]]*$//')
-  if [ -z "$LIVE_NORM" ]; then
-    warn "could not read the live JARVIS system prompt from jarvis-hass - drift against the repo is UNVERIFIED"
-  elif [ "$(printf '%s' "$LIVE_NORM" | md5sum)" = "$(printf '%s' "$REPO_PROMPT" | md5sum)" ]; then
-    ok "live JARVIS system prompt matches jarvis-prompt.txt"
-  else
-    fail "live JARVIS system prompt DIFFERS from jarvis-prompt.txt - the model is being told something the repo does not say; redeploy with 'docker exec jarvis-hass python3 /tmp/patch_prompt_offline.py --apply' (HA must be stopped) and see jarvis/deploy_prompt.py"
-  fi
-
-  # The specific line that caused the phantom action. Checked by name because
-  # a future edit could reintroduce it without changing anything else.
-  if printf '%s' "$LIVE_NORM" | grep -qi "movie time"; then
-    fail "the live prompt still references 'Movie time' - script.movie_time is NOT exposed to the model, so it will narrate the action instead of performing it"
-  else
-    ok "live prompt does not reference the unexposed Movie time script"
-  fi
-else
-  warn "$JARVIS_DIR/jarvis-prompt.txt is missing - cannot check live prompt drift"
-fi
-
-# --- local-first routing ----------------------------------------------------
-# Measured 2026-08-09: 12 of 15 non-actuating benchmark utterances resolve
-# through HA's built-in parser at a median 18.3 ms, against 1472 ms through
-# qwen2.5:3b. The failure mode is NOT an error -- if the custom sentences fail
-# to load or the router is disabled, everything still works, just ~80x slower
-# and burning GPU on every "lights on". Nothing user-visible reports that, so
-# the router's own counters are the only signal.
-ROUTER_JSON=$(curl -s -m 10 "http://localhost:3100/api/status" 2>/dev/null)
-if [ -z "$ROUTER_JSON" ]; then
-  warn "jarvis-voice /api/status did not answer - intent routing is UNVERIFIED"
-else
-  if printf '%s' "$ROUTER_JSON" | grep -q '"router"'; then
-    ok "jarvis-voice exposes router statistics"
-    R_LOCAL=$(printf '%s' "$ROUTER_JSON" | sed -n 's/.*"local_hits":[[:space:]]*\([0-9]*\).*/\1/p')
-    R_LLM=$(printf '%s' "$ROUTER_JSON" | sed -n 's/.*"llm_hits":[[:space:]]*\([0-9]*\).*/\1/p')
-    R_TOTAL=$(( ${R_LOCAL:-0} + ${R_LLM:-0} ))
-    # Only meaningful once real commands have gone through; a freshly restarted
-    # container legitimately reports 0/0 and that is not a fault.
-    if [ "$R_TOTAL" -ge 20 ]; then
-      R_SHARE=$(( ${R_LOCAL:-0} * 100 / R_TOTAL ))
-      if [ "$R_SHARE" -lt 40 ]; then
-        warn "only ${R_SHARE}% of the last $R_TOTAL commands were handled locally (expected ~80%) - custom sentences may have failed to load; check /config/custom_sentences/en/jarvis.yaml"
-      else
-        ok "local-first routing is handling ${R_SHARE}% of commands without the model"
-      fi
-    else
-      ok "router counters present ($R_TOTAL commands since restart, too few to judge the split)"
-    fi
-  else
-    fail "jarvis-voice /api/status has no router block - voice_server.py is running a build WITHOUT the local-first router, so every command pays full model latency"
-  fi
-fi
-
-# --- the custom sentences that make local routing possible ------------------
-# tuya-local wipes its devices/ directory on upgrade and this file lives in the
-# same class of "config HA owns that an upgrade can drop". If it vanishes,
-# argument extraction and the whole comfort table silently fall back to the LLM.
-if MSYS_NO_PATHCONV=1 docker exec jarvis-hass test -f /config/custom_sentences/en/jarvis.yaml 2>/dev/null; then
-  SENT_COUNT=$(MSYS_NO_PATHCONV=1 docker exec jarvis-hass sh -c "grep -c '^  Jarvis' /config/custom_sentences/en/jarvis.yaml" 2>/dev/null | tr -d '\r')
-  if [ "${SENT_COUNT:-0}" -ge 15 ]; then
-    ok "custom sentences installed ($SENT_COUNT JARVIS intents)"
-  else
-    warn "custom_sentences/en/jarvis.yaml has only ${SENT_COUNT:-0} JARVIS intents - expected at least 15; local routing coverage will be reduced"
-  fi
-else
-  fail "/config/custom_sentences/en/jarvis.yaml is MISSING - argument extraction ('set the AC to 22') and the comfort table all fall back to the model at ~1.5s each"
-fi
-
-if MSYS_NO_PATHCONV=1 docker exec jarvis-hass test -f /config/packages/jarvis_intents.yaml 2>/dev/null; then
-  ok "intent_script handlers installed"
-else
-  fail "/config/packages/jarvis_intents.yaml is MISSING - the custom sentences will match and then do NOTHING, which is worse than not matching"
-fi
-
-# --- entity aliases ---------------------------------------------------------
-# Incident 2026-08-09: the lights are registered as "Gang 1/2/3". Nobody says
-# that out loud, so every natural light command missed the local parser and
-# went to the model. Aliases live in the entity registry, which HA rewrites on
-# shutdown, so they are exactly the kind of thing that can vanish.
-# NOTE the key. As of entity-registry minor_version 23 the aliases live under
-# "aliases_v2"; the old "aliases" key is still present on every record but is now
-# permanently EMPTY. Reading only "aliases" reports zero for a registry that is
-# perfectly populated -- that briefly looked like the aliases had been lost in a
-# restart. Read both so this survives the migration in either direction.
-ALIAS_N=$(MSYS_NO_PATHCONV=1 docker exec jarvis-hass python3 -c '
-import json
-try:
-    d = json.load(open("/config/.storage/core.entity_registry", encoding="utf-8"))
-except Exception:
-    raise SystemExit(0)
-n = 0
-for e in d["data"]["entities"]:
-    if e.get("entity_id", "").startswith(("light.node_switch_gang", "fan.fan")):
-        n += len(e.get("aliases_v2") or e.get("aliases") or [])
-print(n)
-' 2>/dev/null | tr -d '\r')
-if [ "${ALIAS_N:-0}" -ge 10 ]; then
-  ok "voice aliases present on the lights and fan ($ALIAS_N total)"
-else
-  warn "only ${ALIAS_N:-0} voice aliases on the lights/fan - natural phrasings like 'turn on light one' will miss the local parser and cost ~1.5s each; re-run 'docker exec jarvis-voice python /app/ha_aliases.py --apply'"
-fi
-
-# --- closed-loop verification actually loaded -------------------------------
-# Incident 2026-08-09: the running jarvis-voice image had NO verify/ directory.
-# The server logged "replies will NOT be checked against Home Assistant" once at
-# startup and then spoke unverified confirmations for hours. The repo looked
-# complete the whole time -- the file existed in git and not in the image.
-# Capture to temp file instead of shell variable: the log is >1 MB and exceeds
-# ARG_MAX when passed as an echo argument, which triggers SIGPIPE (exit 141)
-# under pipefail — making grep appear to fail even when the match exists.
-_docker_logs_tmp="/tmp/_audit_docker_logs_$$.txt"
-docker logs jarvis-voice > "$_docker_logs_tmp" 2>&1
-if grep -q "closed-loop verification enabled" "$_docker_logs_tmp"; then
-  ok "closed-loop reply verification is enabled"
-elif grep -qi "could not be imported" "$_docker_logs_tmp"; then
-  fail "jarvis-voice could NOT import verify/closed_loop.py - replies are spoken WITHOUT being checked against Home Assistant, so the model can confirm actions it never took"
-else
-  warn "cannot tell from jarvis-voice logs whether closed-loop verification is enabled"
-fi
-rm -f "$_docker_logs_tmp"
-
-# --- A6 closed-loop verification: structured log + no dead code -------------
-# Incident 2026-08-16: router.py had a _verify_all() closure that rebound
-# `speech` via nonlocal AFTER RouteResult had already been constructed. The
-# spoken reply went out with the old string; complaints only appeared in the
-# background task and were never heard. Delete that pattern, replace with one
-# structured log line per verify call, and assert both in the audit.
-_A6_REPO_DISPATCH=$(grep -c "A6 dispatching verify" "$JARVIS_DIR/router.py" 2>/dev/null || true)
-_A6_REPO_DEAD=$(grep -c "nonlocal speech" "$JARVIS_DIR/router.py" 2>/dev/null || true)
-_A6_REPO_LOG_LINE=$(grep -c 'A6 verify %s tool=' "$JARVIS_DIR/hermes/executor.py" 2>/dev/null || true)
-if [ "$_A6_REPO_DEAD" -eq 0 ] && [ "$_A6_REPO_DISPATCH" -ge 1 ] && [ "$_A6_REPO_LOG_LINE" -ge 1 ]; then
-  ok "A6 verify: no dead nonlocal-speech code; dispatch + structured log line present"
-else
-  fail "A6 verify broken in repo: dead_code=$_A6_REPO_DEAD dispatch=$_A6_REPO_DISPATCH log_line=$_A6_REPO_LOG_LINE"
-fi
-
-# Mismatch rate from docker logs (last 72 h). One line per verified actuation;
-# MISMATCH = actuation did not produce the expected entity state.
-_A6_MATCH=$(docker logs jarvis-voice --since "72h" 2>/dev/null | grep -c "A6 verify MATCH" || true)
-_A6_MISMATCH=$(docker logs jarvis-voice --since "72h" 2>/dev/null | grep -c "A6 verify MISMATCH" || true)
-_A6_TOTAL=$(( _A6_MATCH + _A6_MISMATCH ))
-if [ "$_A6_TOTAL" -eq 0 ]; then
-  warn "A6 verify: no actuation events in last 72 h of logs - mismatch rate is UNKNOWN"
-elif [ "$_A6_MISMATCH" -eq 0 ]; then
-  ok "A6 verify: $_A6_TOTAL actuations checked, 0 mismatches (100% success)"
-else
-  _PCT=$(( _A6_MISMATCH * 100 / _A6_TOTAL ))
-  warn "A6 verify: $_A6_MISMATCH/_A6_TOTAL mismatches ($_PCT%) in last 72 h — actuation chain is failing somewhere"
-fi
-
-
-# ---------------------------------------------------------------------------
-sec "21. Host stays awake"
+sec "20. Host stays awake"
 # Incident 2026-08-09: the host entered Modern Standby at 00:24:41 and did not
 # leave until 07:34:52 -- 7 h 10 m with every container unreachable. This box
 # reports "Standby (S0 Low Power Idle) NETWORK DISCONNECTED", so during standby
@@ -1473,7 +1093,7 @@ if command -v powercfg.exe >/dev/null 2>&1; then
   elif [ "${_sys:-0}" -ge 1 ]; then
     warn "SYSTEM wake assertion is held but DISPLAY is not - the box stays up but the panel can still blank; check keep-awake.ps1 is passing ES_DISPLAY_REQUIRED"
   else
-    fail "NO keep-awake assertion held - powercfg /requests shows no powershell.exe under DISPLAY/SYSTEM; the 'JARVIS - Keep Awake' task is dead or asserting nothing (a running process is NOT proof - see this section's comment)"
+    fail "NO keep-awake assertion held - powercfg /requests shows no powershell.exe under DISPLAY/SYSTEM; keep-awake.ps1 is not running or is asserting nothing (a running process is NOT proof - see this section's comment)"
   fi
 
   # 3. Did we actually sleep since the last audit? Direct evidence beats
@@ -1501,396 +1121,15 @@ fi
 
 
 # ---------------------------------------------------------------------------
-sec "22. JARVIS image matches the repo"
-# The single most expensive recurring failure in this project. THREE separate
-# features shipped, were verified working, and then silently reverted:
-#   verify/    - image predated it; jarvis-voice ran with closed-loop checking
-#                OFF and spoke confirmations for actions it never performed
-#   hermes/    - never COPYd, so voice_server.py could not import it and Hermes
-#                stayed a benchmark that never touched production
-#   hud.py     - docker cp'd into the running container; all six /api/hud/
-#                panels worked until the host rebooted 2026-08-09 07:41, then
-#                every one of them returned 404
-#
-# The mechanism every time: an agent writes a file to disk, copies it into the
-# RUNNING container to test, confirms it works, and reports success. It is true
-# -- right up until the container is recreated, at which point the image (which
-# never got the file) wins and the feature vanishes. Nothing in a normal health
-# check catches this, because the container is up and answering.
-#
-# So this compares the REPO against a FRESH container started from the image,
-# not against the running one. Checking the running container would report
-# green in exactly the scenario this exists to catch.
-JDIR="/c/ServerData/Stacks/jarvis"
-if [ -d "$JDIR" ] && docker image inspect jarvis-voice:latest >/dev/null 2>&1; then
-  _drift=""; _missing=""; _checked=0
-  # The file list is DERIVED FROM Dockerfile.ui, never hand-written. That is the
-  # whole point of this block and it was learned the hard way.
-  #
-  # This check originally carried a hardcoded list. On 2026-08-09 hermes/__init__.py
-  # was created one minute AFTER the image was built and only docker cp'd in, so
-  # the image lacked it -- and because the hardcoded list did not name
-  # __init__.py, this check reported GREEN on exactly the failure it exists to
-  # catch. Without that file `import hermes.hermes` raises "'hermes' is not a
-  # package"; router.py catches the error, logs one warning, and silently routes
-  # everything to the 17-tool agent -- reintroducing the tool cliff invisibly.
-  # A hand-maintained list only ever covers the failures you already had.
-  #
-  # A plain glob of *.py is NOT the alternative: this directory also holds ~30
-  # host-side tools (IR capture, Tuya scripts, _probe_*) that must never be in
-  # the image, and flagging them would train everyone to ignore this check.
-  # Dockerfile.ui is the actual contract for what belongs in the image, so it is
-  # the only correct source of truth.
-  _files=""
-  while IFS= read -r _line; do
-    # "COPY a.py b.py ./" -> the files; "COPY hermes/ ./hermes/" -> expand the dir
-    for _tok in $(printf '%s' "$_line" | sed -E 's/^COPY[[:space:]]+//' | sed -E 's/[[:space:]]+\.?\/?[^[:space:]]*\/?$//'); do
-      case "$_tok" in
-        */) _files="$_files $(cd "$JDIR" && find "${_tok%/}" -type f \
-              \( -name '*.py' -o -name '*.js' -o -name '*.html' -o -name '*.css' \) \
-              -not -path '*__pycache__*' 2>/dev/null | tr '\n' ' ')" ;;
-        *)  _files="$_files $_tok" ;;
-      esac
-    done
-  done <<EOF
-$(grep '^COPY' "$JDIR/Dockerfile.ui" 2>/dev/null)
-EOF
-  for f in $_files; do
-    [ -f "$JDIR/$f" ] || continue
-    _checked=$((_checked+1))
-    _r=$(md5sum "$JDIR/$f" 2>/dev/null | cut -d' ' -f1)
-    _i=$(MSYS_NO_PATHCONV=1 docker run --rm --entrypoint sh jarvis-voice:latest -c "md5sum /app/$f 2>/dev/null | cut -d' ' -f1" 2>/dev/null | tr -d '\r\n')
-    if [ -z "$_i" ]; then _missing="${_missing}$f "
-    elif [ "$_r" != "$_i" ]; then _drift="${_drift}$f "; fi
-  done
-  if [ -n "$_missing" ]; then
-    fail "in the repo but NOT in the jarvis-voice image: ${_missing}- these work only until the container is recreated, then they vanish; add them to Dockerfile.ui and rebuild"
-  fi
-  if [ -n "$_drift" ]; then
-    fail "repo and image DIFFER for: ${_drift}- the running container is not what the repo says it is; rebuild with 'docker compose build jarvis-voice'"
-  fi
-  if [ -z "$_missing" ] && [ -z "$_drift" ]; then
-    ok "jarvis-voice image matches the repo for all $_checked server files"
-  fi
-
-  # A file being present is not the same as the server importing it. hud.py was
-  # present in the repo for hours while every panel 404'd.
-  if curl -sf -m 8 "http://localhost:3100/api/hud/vitals" >/dev/null 2>&1; then
-    ok "HUD panel endpoints are live (/api/hud/vitals answers)"
-  else
-    fail "hud.py is in the image but /api/hud/vitals does not answer - the module is present and NOT registered; check hud.register(app) in voice_server.py"
-  fi
-else
-  warn "jarvis dir or jarvis-voice:latest image not found - skipping repo/image drift check"
-fi
-
-
-# ---------------------------------------------------------------------------
-sec "23. PC agent runs in the interactive session"
-# Incident 2026-08-09: port 8099 answered 200 and a previous session recorded
-# "the PC agent is live on 8099". It was not. The responder was the OLD
-# wol-helper.ps1, which serves only /health and /status; pc-agent.ps1 had been
-# written (60 KB, 24 routes) and never deployed. The earlier check read the app
-# allowlist out of the FILE and the health status off the PORT and reported them
-# as one working service.
-#
-# So this checks the SERVICE NAME in the health payload, not the status code.
-# Both scripts answer 200 on /health; only the payload distinguishes them.
-#
-# The session field is equally load-bearing. The old helper ran as
-# LogonType=ServiceAccount, which lands in session 0 -- and session 0 has no
-# desktop. Every window, input, screenshot and app-launch route would fail there
-# while /health still returned a cheerful 200, because serving HTTP does not
-# require a desktop. "interactive": true is the agent's own report of whether it
-# can actually drive the machine.
-_pc=$(curl -s -m 8 "http://localhost:8099/health" 2>/dev/null)
-if [ -z "$_pc" ]; then
-  fail "nothing answers http://localhost:8099/health - the PC agent is down; voice control of the PC, app launching and typing are all dead"
-else
-  _svc=$(printf '%s' "$_pc" | grep -oE '"service"[[:space:]]*:[[:space:]]*"[^"]+"' | cut -d'"' -f4)
-  _int=$(printf '%s' "$_pc" | grep -oE '"interactive"[[:space:]]*:[[:space:]]*(true|false)' | grep -oE '(true|false)')
-  case "$_svc" in
-    jarvis-pc-agent)
-      if [ "$_int" = "true" ]; then
-        ok "PC agent is live on 8099 and interactive (can drive the desktop)"
-      else
-        fail "PC agent is running but interactive=$_int - it is in session 0 with no desktop, so app launch, typing, windows and screenshots will all fail while /health still returns 200; the task must use LogonType=Interactive"
-      fi
-      ;;
-    jarvis-wol-helper)
-      fail "port 8099 is served by the OLD wol-helper, not the PC agent - it has only /health and /status, so every PC control route is absent; enable the 'JARVIS - PC Agent' task and disable 'JARVIS - WOL Helper'"
-      ;;
-    *)
-      warn "8099 answers but reports service='$_svc' - expected jarvis-pc-agent"
-      ;;
-  esac
-
-  # WOL backward compatibility. pc-agent replaced wol-helper on the same port and
-  # deliberately kept /status and /wake; losing them would silently break waking
-  # the main PC, which is a feature Natik asked for specifically.
-  _wolcode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "http://localhost:8099/status" 2>/dev/null)
-  # 401 is a PASS here: the route exists and is refusing an unauthenticated
-  # request, which is the wanted behaviour. 404 would mean the route is gone.
-  case "$_wolcode" in
-    200|401) ok "WOL /status route preserved on 8099 (http $_wolcode)" ;;
-    404)     fail "WOL /status route is GONE from 8099 - waking the main PC is broken" ;;
-    *)       warn "WOL /status on 8099 returned http $_wolcode" ;;
-  esac
-
-  # File routes. Added 2026-08-09; /pc/file/open is the only route in the agent
-  # that runs ShellExecute on a path, so its two allowlists are security
-  # boundaries, not conveniences.
-  _fcode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "http://localhost:8099/pc/folders" 2>/dev/null)
-  case "$_fcode" in
-    401) ok "file routes present on 8099 (/pc/folders answers, auth enforced)" ;;
-    404) fail "/pc/folders is missing from 8099 - the running agent predates the file routes; restart it with host-helper/restart-agent.ps1 (Restart-ScheduledTask alone does NOT reload it - the old process keeps the port and the new one dies unable to bind)" ;;
-    200) warn "/pc/folders answered 200 WITHOUT a token - authentication is not being enforced on the file routes" ;;
-    *)   warn "/pc/folders returned http $_fcode" ;;
-  esac
-
-  # The extension allowlist must never grow an executable type. This is a static
-  # check of the file rather than a live probe, because the failure mode is
-  # someone adding ".lnk" or ".zip" to be helpful, and by the time it is live it
-  # is one voice command from running something.
-  _ff="/c/ServerData/Stacks/jarvis/host-helper/folders.json"
-  if [ -f "$_ff" ]; then
-    _danger=$(grep -oE '"\.(exe|bat|cmd|com|ps1|psm1|vbs|vbe|js|jse|wsf|msi|msp|scr|cpl|hta|reg|lnk|url|inf|jar|py|sh|apk|iso)"' "$_ff" \
-              | grep -v '_extension_comment' | tr -d '"' | tr '\n' ' ')
-    if [ -n "$_danger" ]; then
-      fail "folders.json allows EXECUTABLE extensions: $_danger- /pc/file/open uses ShellExecute, so this is arbitrary code execution by voice; remove them"
-    else
-      ok "folders.json allows no executable extensions"
-    fi
-    # C:\ServerData holds secrets.env and every app database. It must not be an
-    # openable root. Sync/ lives under it and IS allowed, which is intentional
-    # and safe -- hence the anchored match on the root itself.
-    if grep -qE '"path"[[:space:]]*:[[:space:]]*"C:\\\\ServerData\\\\?"' "$_ff"; then
-      fail "folders.json exposes C:\\ServerData as an openable root - that directory holds secrets.env and every application database"
-    else
-      ok "folders.json does not expose the ServerData root"
-    fi
-  else
-    warn "folders.json not found - the PC agent's file routes will refuse every request"
-  fi
-fi
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-sec "24. Every Hermes tool has somewhere to dispatch"
-# THE INCIDENT THIS EXISTS FOR (2026-08-09)
-# hermes.py carried six pc_* tools and a "pc" specialist for a full day, the PC
-# agent on 8099 answered every one of them correctly by curl, and PC control was
-# nevertheless completely dead by voice. executor.py had exactly two dispatch
-# paths -- HA intents and HA scripts -- so `pc_app` was sent to
-# `script.pc_app`, which does not exist. Home Assistant has 14 scripts and not
-# one of them starts with pc_.
-#
-# The way it failed is the reason this check is worth its length. The executor
-# reported exec_failed, Hermes fell through, and the big agent -- which holds no
-# PC tool at all -- answered from its own head: "Opening Spotify, sir", with
-# nothing launched. Nothing in any log said "broken". Every individual component
-# tested green.
-#
-# So this derives the tool list FROM hermes.py and proves each tool has a real
-# target: an HA intent, an HA script that exists, a context tool, or an entry in
-# HTTP_ROUTES backed by a service that answers. A tool with no target is a
-# guaranteed phantom action, so it is a FAIL, not a warning.
-JDIR="/c/ServerData/Stacks/jarvis"
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx jarvis-voice; then
-  # Run INSIDE the container: it is the only place the real tool tables and the
-  # real HTTP_ROUTES live, and reading them with grep from the host would be a
-  # second, drifting copy of the truth. Same principle as deriving the image
-  # file list from Dockerfile.ui rather than hand-listing it.
-  _toolmap=$(docker exec jarvis-voice python -c "
-import hermes.hermes as H, hermes.executor as E
-for t in sorted(H.TOOLS):
-    if t in E.INTENT_TOOLS: kind='intent'
-    elif t in E.CONTEXT_TOOLS: kind='context'
-    elif t in E.HTTP_ROUTES: kind='http:'+E.HTTP_ROUTES[t]
-    elif hasattr(E, 'CALL_TOOLS') and t in E.CALL_TOOLS: kind='call'
-    else: kind='script'
-    print(t, kind)
-" 2>/dev/null)
-  if [ -z "$_toolmap" ]; then
-    warn "could not read the Hermes tool table out of jarvis-voice - dispatch coverage unverified"
-  else
-    _hass_token=$(grep -E "^JARVIS_HASS_TOKEN=" "$SECRETS_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d '\r')
-    _scripts=$(curl -s -m 15 -H "Authorization: Bearer $_hass_token" \
-                 "http://localhost:8123/api/states" 2>/dev/null \
-               | tr ',' '\n' | grep -oE '"script\.[a-z0-9_]+"' | tr -d '"' | sed 's/^script\.//' | sort -u)
-    _orphans=""; _n=0
-    while read -r _tool _kind; do
-      [ -n "$_tool" ] || continue
-      _n=$((_n+1))
-      case "$_kind" in
-        intent|context|call) : ;;
-        http:*) : ;;   # liveness of those services is checked below and in 23
-        script)
-          # An empty script list means HA or the token is broken, not that every
-          # tool is orphaned. Reporting 14 phantom failures for one auth problem
-          # would bury the real cause.
-          if [ -n "$_scripts" ] && ! printf '%s\n' "$_scripts" | grep -qx "$_tool"; then
-            _orphans="$_orphans $_tool"
-          fi
-          ;;
-      esac
-    done <<EOF
-$_toolmap
-EOF
-    if [ -z "$_scripts" ]; then
-      warn "could not list Home Assistant scripts - Hermes script-tool coverage unverified"
-    elif [ -n "$_orphans" ]; then
-      fail "Hermes tools with NO dispatch target:$_orphans - each one fails in the executor and falls through to an agent that cannot do it either, so JARVIS will confirm an action that never happened; add them to HTTP_ROUTES in hermes/executor.py or create the matching script"
-    else
-      ok "all $_n Hermes tools have a dispatch target (intent, script, context or HTTP service)"
-    fi
-  fi
-else
-  warn "jarvis-voice is not running - Hermes dispatch coverage unverified"
-fi
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-sec "25. WhatsApp bridge"
-_wa=$(curl -s -m 8 "http://localhost:8097/health" 2>/dev/null)
-if [ -z "$_wa" ]; then
-  fail "nothing answers http://localhost:8097/health - the WhatsApp bridge is down, so sending and reading messages by voice are both dead; the 'JARVIS - WhatsApp' task should restart it within 5 minutes"
-else
-  _wasvc=$(printf '%s' "$_wa" | grep -oE '"service"[[:space:]]*:[[:space:]]*"[^"]+"' | cut -d'"' -f4)
-  if [ "$_wasvc" != "jarvis-whatsapp" ]; then
-    warn "8097 answers but reports service='$_wasvc' - expected jarvis-whatsapp"
-  else
-    _linked=$(printf '%s' "$_wa" | grep -oE '"linked"[[:space:]]*:[[:space:]]*(true|false)' | grep -oE '(true|false)')
-    if [ "$_linked" = "true" ]; then
-      ok "WhatsApp bridge is linked and serving"
-    else
-      # Not a FAIL: the fix is a QR scan on Natik's phone, which no amount of
-      # server-side work can perform. But it must not be silent either -- an
-      # unlinked bridge means every "message mum" turn ends in a refusal.
-      warn "WhatsApp bridge is running but NOT linked - scan the QR in jarvis/wa/wa-bridge.log from WhatsApp > Linked devices, or sending and reading stay dead"
-    fi
-  fi
-
-  # The bridge must never answer an unauthenticated request. It holds the
-  # ability to message real people.
-  _wacode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST \
-              -H 'Content-Type: application/json' \
-              -d '{"to":"mum","message":"audit probe - must never send"}' \
-              "http://localhost:8097/send" 2>/dev/null)
-  case "$_wacode" in
-    401) ok "WhatsApp /send refuses an unauthenticated request (http 401)" ;;
-    200) fail "WhatsApp /send ACCEPTED an unauthenticated request - anything that can reach loopback can message Natik's contacts; the bridge must fail closed" ;;
-    *)   warn "WhatsApp /send returned http $_wacode to an unauthenticated request - expected 401" ;;
-  esac
-fi
-
-# The contact allowlist is the only thing standing between a misheard word and a
-# message to the wrong person, so its absence is a failure even though the
-# bridge would then simply refuse everything.
-_cf="/c/ServerData/Stacks/jarvis/wa/contacts.json"
-if [ -f "$_cf" ]; then
-  # Counted with a JSON parser, not a grep. contacts.json carries a long
-  # "_comment" array explaining the allowlist, and a line-wise grep counted
-  # every line of that prose as a contact -- it reported 15 when there are 2.
-  _nc=$(python -c "
-import json,sys
-d=json.load(open(r'C:\ServerData\Stacks\jarvis\wa\contacts.json',encoding='utf-8'))
-print(len([k for k in d if not k.startswith('_')]))
-" 2>/dev/null || echo "?")
-  if grep -qE '"(any|all|\*)"\s*:' "$_cf"; then
-    fail "contacts.json contains a wildcard entry - the allowlist is the whole safety model for sending; remove it"
-  else
-    ok "WhatsApp contact allowlist present ($_nc entries)"
-  fi
-else
-  fail "jarvis/wa/contacts.json is missing - the bridge refuses every send, so messaging is dead"
-fi
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-sec "26. Minecraft server"
-
-_mcdir="/c/ServerData/Stacks/minecraft"
-_mccompose="$_mcdir/docker-compose.yml"
-
-if [ ! -f "$_mccompose" ]; then
-  warn "minecraft/docker-compose.yml is missing - the stack was removed or never restored"
-else
-  # INCIDENT THIS GUARDS (2026-09-09, designed-in rather than observed): this
-  # host has 15.4 GB of RAM and the WSL2 VM is capped. A Minecraft JVM with no
-  # container ceiling grows until the VM is exhausted, and the Linux OOM killer
-  # then picks its victim by score -- which is jarvis-ollama or a voice
-  # container long before it is Minecraft. That kills the voice loop silently
-  # and the only symptom is "JARVIS stopped answering". mem_limit makes Docker
-  # kill Minecraft instead, keeping the blast radius inside this stack.
-  if grep -qE '^\s*mem_limit:' "$_mccompose"; then
-    ok "minecraft has a mem_limit (voice loop is protected from its OOM)"
-  else
-    fail "minecraft/docker-compose.yml has NO mem_limit - an unbounded Minecraft JVM will exhaust the WSL VM and the OOM killer will take a JARVIS container, not Minecraft; restore mem_limit"
-  fi
-
-  # INCIDENT THIS GUARDS (2026-09-09): the minecraft stack was written without
-  # the dns: override every other outbound-calling service here carries. The
-  # modpack installer then failed nine times in a row with
-  #   java.net.UnknownHostException: Failed to resolve 'api.curseforge.com'
-  #   DnsErrorCauseException: Query failed with SERVFAIL
-  # OOMKilled was false and the exit code was 0, so it read as a memory problem
-  # for several minutes and was not one. The ISP resolver SERVFAILs external
-  # API hostnames; this is the same defect that silently kills TMDb lookups in
-  # the streaming stack, and it is invisible until something needs the network.
-  if grep -qE '^\s*dns:' "$_mccompose"; then
-    ok "minecraft has the dns: override (CurseForge API resolvable)"
-  else
-    fail "minecraft/docker-compose.yml has NO dns: override - the ISP resolver SERVFAILs api.curseforge.com, so mod installs and updates fail with UnknownHostException while looking like a memory fault; add dns: 1.1.1.1 / 8.8.8.8"
-  fi
-
-  # Geyser cannot translate modded blocks/items, so a Bedrock listener on a
-  # Tensura server is a port that either refuses joins or drops players into a
-  # world they cannot render. Publishing it would look like crossplay works.
-  if grep -qE '^\s*-\s*"?19132' "$_mccompose"; then
-    warn "minecraft publishes 19132 (Bedrock) - Geyser cannot translate this modpack's custom content, so that port cannot serve a working game; see minecraft/README.md"
-  else
-    ok "no Bedrock port published (correct for a client-side-mod server)"
-  fi
-
-  # RCON is an unauthenticated-beyond-the-password full server console. It is
-  # reachable by container name on minecraft_default for the Homarr tile and
-  # must never be bound to a host port.
-  if grep -qE '^\s*-\s*"?[0-9.]*:?25575' "$_mccompose"; then
-    fail "minecraft publishes RCON 25575 on the host - that is a full server console on the LAN; keep it internal to minecraft_default"
-  else
-    ok "RCON is not published to the host"
-  fi
-
-  # Deliberately NOT probing tcp/25565. ENABLE_AUTOPAUSE SIGSTOPs the JVM when
-  # idle, and any TCP connect is exactly the knock that wakes it. A weekly
-  # audit probe would resume a 6 GB JVM every Sunday and quietly defeat the
-  # feature. Container state is read from Docker instead.
-  # STOPPED IS THE NORMAL STATE and must not warn. Minecraft is opt-in on this
-  # host: it holds ~5.4 GB of 15.4 GB, so it runs only while someone is playing.
-  # An earlier version of this check warned on anything but "running", which
-  # would have trained everyone to ignore a warning that fires every single day.
-  # A check that cries wolf is worse than no check.
-  _mcstate=$(docker inspect -f '{{.State.Status}}' minecraft 2>/dev/null)
-  case "$_mcstate" in
-    running)          ok "minecraft is running (autopause not probed by design)" ;;
-    exited|created)   ok "minecraft is stopped - the normal idle state on this host" ;;
-    "")               warn "minecraft container does not exist - stack was removed or never created" ;;
-    *)                warn "minecraft container state is '$_mcstate' - expected running, exited or created" ;;
-  esac
-fi
-
+sec "21. Memory pressure (DNS outage leading indicator)"
 # INCIDENT THIS GUARDS (2026-09-09): the leading indicator nobody was watching.
-# Minecraft (~5.4 GB) came back automatically under restart:always while nobody
-# was playing, and the WSL VM ran out of swap -- SwapFree fell to 880 kB of
-# 3.1 GB. AdGuard did not stop and did not crash (restarts=0, status=running),
-# but it was starved badly enough that its upstream DoH queries timed out and
-# DNS FOR THE WHOLE HOUSE went down. Every container looked healthy. Section 17
-# catches DNS once it has already failed; this catches the condition that
-# causes it, while there is still time to act.
+# An oversized container (then Minecraft, ~5.4 GB, since removed) pushed the
+# WSL VM out of swap -- SwapFree fell to 880 kB of 3.1 GB. AdGuard did not stop
+# and did not crash (restarts=0, status=running), but it was starved badly
+# enough that its upstream DoH queries timed out and DNS FOR THE WHOLE HOUSE
+# went down. Every container looked healthy. Section 17 catches DNS once it has
+# already failed; this catches the condition that causes it, while there is
+# still time to act.
 _vmstat=$(docker run --rm valkey/valkey:9 sh -c 'grep -E "^(MemAvailable|SwapTotal|SwapFree)" /proc/meminfo' 2>/dev/null)
 if [ -n "$_vmstat" ]; then
   _memavail=$(printf '%s' "$_vmstat" | awk '/MemAvailable/{print int($2/1024)}')
@@ -1900,7 +1139,7 @@ if [ -n "$_vmstat" ]; then
   [ "${_swaptot:-0}" -gt 0 ] && _swappct=$(( _swapfree * 100 / _swaptot ))
 
   if [ "${_memavail:-0}" -lt 700 ]; then
-    fail "WSL VM has only ${_memavail} MB available - the box is thrashing; AdGuard stays 'running' while its upstream DNS times out, which takes the whole house offline. Stop Minecraft (docker compose --project-directory /c/ServerData/Stacks/minecraft stop) or park stacks with mc-gamemode.ps1 -On"
+    fail "WSL VM has only ${_memavail} MB available - the box is thrashing; AdGuard stays 'running' while its upstream DNS times out, which takes the whole house offline. Find the oversized container with 'docker stats --no-stream' and stop it"
   elif [ "${_memavail:-0}" -lt 1500 ]; then
     warn "WSL VM available memory is ${_memavail} MB - tight; anything heavy started now will push it into swap"
   else
@@ -1916,59 +1155,52 @@ if [ -n "$_vmstat" ]; then
   fi
 fi
 
-# Minecraft must NOT be on restart:always. At ~5.4 GB on a 15.4 GB host it
-# would resurrect itself on every engine restart, including when nobody is
-# playing -- which is exactly how the box reached swap exhaustion.
-if [ -f "$_mccompose" ]; then
-  if grep -qE '^\s*restart:\s*unless-stopped' "$_mccompose"; then
-    ok "minecraft uses restart: unless-stopped (cannot resurrect itself when stopped)"
-  else
-    fail "minecraft is not on restart: unless-stopped - with restart:always it restarts itself on every engine restart and starves AdGuard into a house-wide DNS outage"
-  fi
-fi
-
-# INCIDENT THIS GUARDS: game mode stops the media, photo and monitoring stacks
-# to free ~3.9 GB for Minecraft. Forgetting to run `mc-gamemode.ps1 -Off` after
-# playing leaves Sonarr, Radarr and Immich down indefinitely, and nothing else
-# reports it -- downloads simply stop happening. Worse, every port check above
-# fails at once, which reads like the media stack has broken rather than like
-# it was deliberately stopped. This turns that confusing flood into one cause.
-# The reference container must be one game mode NEVER stops, or the check
-# cannot fire. This first used jarvis-voice and was silently broken from the
-# moment mc-gamemode.ps1 gained -IncludeJarvis: that switch stops jarvis too,
-# so "jarvis up AND sonarr down" was unsatisfiable and the audit cheerfully
-# reported "game mode is off" while eight stacks were parked. AdGuard is the
-# correct reference -- it is protected unconditionally, because it is DNS for
-# the whole tailnet.
-_ref_up=$(docker inspect -f '{{.State.Status}}' adguardhome 2>/dev/null)
-_sonarr_up=$(docker inspect -f '{{.State.Status}}' sonarr 2>/dev/null)
-if [ "$_ref_up" = "running" ] && [ "$_sonarr_up" != "running" ]; then
-  warn "GAME MODE APPEARS TO BE ON: jarvis is up but sonarr is not. If you finished playing Minecraft, run  Stacks\minecraft\mc-gamemode.ps1 -Off  -- until you do, nothing downloads and the *arr failures above are a consequence of this, not separate faults"
-else
-  ok "game mode is off (media stack is not parked)"
-fi
-
-# The world is the only irreplaceable part -- the 600 MB modpack re-downloads
-# from CurseForge, a world does not. minecraft_data is excluded from
-# backup-volumes.sh on purpose (it would put ~15 GB x 14 days on a 180 GB
-# drive), so this is the check that the narrower backup is actually happening.
-_mcbk="/d/Backups/minecraft"
-if [ ! -d "$_mcbk" ]; then
-  if [ "$_mcstate" = "running" ]; then
-    warn "no Minecraft world backup directory at D:\Backups\minecraft - the server is running but its world has never been backed up; run minecraft\mc-backup.sh"
-  else
-    ok "no Minecraft world backup yet (server has not run)"
-  fi
-else
-  _newest=$(find "$_mcbk" -name 'world-*.tgz' -mtime -8 2>/dev/null | head -1)
-  if [ -n "$_newest" ]; then
-    ok "Minecraft world backup is under 8 days old"
-  else
-    warn "no Minecraft world backup newer than 8 days in D:\Backups\minecraft - the world is the one thing that cannot be re-downloaded; check the scheduled job"
-  fi
-fi
 # ---------------------------------------------------------------------------
 _emit ""
+
+# ---------------------------------------------------------------------------
+sec "22. Monitoring + stability watchers"
+# Added 2026-11-01 after a 145-agent audit found problems that nothing watched:
+# 25/30 Kuma monitors had no alert, the host ran out of UDP ports 51 times, the
+# USB media disk re-enumerated up to 8x/day (each one restarts all of Docker),
+# and Windows sat at ~0.6 GB available. Each check below is read-only.
+if [ -n "${KUMA_API_KEY:-}" ]; then
+  _km=$(curl -s -m 10 -u ":$KUMA_API_KEY" http://127.0.0.1:3001/metrics 2>/dev/null | grep '^monitor_status{')
+  # Not 'Weekly Audit': that monitor is this script's own result, so counting it
+  # made one failed run fail every later run (seen 2026-11-02).
+  _kdown=$(printf '%s\n' "$_km" | awk '/\} 0$/' | grep -v 'monitor_name="Weekly Audit"' | sed -E 's/.*monitor_name="([^"]+)".*/\1/' | paste -sd, -)
+  _kn=$(printf '%s\n' "$_km" | grep -c '} ')
+  if [ -z "$_km" ]; then warn "could not read Uptime Kuma metrics"
+  elif [ -n "$_kdown" ]; then fail "Uptime Kuma shows DOWN: $_kdown"
+  else ok "Uptime Kuma: all $_kn reporting monitors up"; fi
+fi
+_kna=$(MSYS_NO_PATHCONV=1 docker exec uptime-kuma-uptime-kuma-1 node -e "const s=require('@louislam/sqlite3');const d=new s.Database('/app/data/kuma.db',s.OPEN_READONLY);d.get('select count(*) n from monitor m where active=1 and not exists (select 1 from monitor_notification x where x.monitor_id=m.id)',(e,r)=>console.log(e?'?':r.n))" 2>/dev/null | tr -d '\r\n ')
+case "$_kna" in 0) ok "every active Kuma monitor has a Discord alert attached" ;; ''|'?') warn "could not check Kuma alert wiring" ;; *) fail "$_kna active Kuma monitor(s) have NO notification - an outage there would be silent" ;; esac
+_udp=$(powershell.exe -NoProfile -NonInteractive -Command 'try{(Get-WinEvent -FilterHashtable @{LogName="System";ProviderName="Tcpip";Id=4266;StartTime=(Get-Date).AddDays(-1)} -ErrorAction Stop|Measure-Object).Count}catch{0}' 2>/dev/null | tr -d '\r\n ')
+if [ "${_udp:-0}" -ge 3 ]; then fail "host ran out of UDP ports ${_udp}x in 24 h (Tcpip 4266) - see logs/udp-ports.log for the owning process"
+elif [ "${_udp:-0}" -ge 1 ]; then warn "host ran out of UDP ports ${_udp}x in 24 h (Tcpip 4266) - see logs/udp-ports.log"
+else ok "no UDP port exhaustion (Tcpip 4266) in 24 h"; fi
+_dre=$(powershell.exe -NoProfile -NonInteractive -Command 'try{(Get-WinEvent -FilterHashtable @{LogName="System";ProviderName="Microsoft-Windows-Ntfs";Id=98;StartTime=(Get-Date).AddDays(-1)} -ErrorAction Stop | Where-Object { $_.Message -like "Volume D:*" } | Measure-Object).Count}catch{0}' 2>/dev/null | tr -d '\r\n ')
+if [ "${_dre:-0}" -ge 3 ]; then warn "USB media disk D: re-mounted ${_dre}x in 24 h (each drop makes mount-watchdog restart all of Docker, incl. AdGuard) - RTL9201 UAS bridge; try another port/cable"
+else ok "USB media disk D: re-mounts in 24 h: ${_dre:-0}"; fi
+_dump=$(ls -t /c/ServerData/Immich/backups/immich-db-backup-*.sql.gz 2>/dev/null | head -1)
+if [ -z "$_dump" ]; then fail "no Immich DB dump found in /c/ServerData/Immich/backups"
+else
+  _age=$(( ( $(date +%s) - $(stat -c %Y "$_dump") ) / 3600 ))
+  if [ "$_age" -gt 26 ]; then fail "newest Immich DB dump is ${_age} h old (expected daily at 03:30 IST)"
+  elif gzip -t "$_dump" 2>/dev/null; then ok "Immich DB dump is ${_age} h old and passes gzip -t"
+  else fail "newest Immich DB dump fails gzip -t: $(basename "$_dump")"; fi
+fi
+_hav=$(powershell.exe -NoProfile -NonInteractive -Command '[int](Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue' 2>/dev/null | tr -d '\r\n ')
+if [ "${_hav:-9999}" -lt 600 ]; then fail "Windows has only ${_hav} MB available - host memory starvation (the AdGuard outage condition)"
+elif [ "${_hav:-9999}" -lt 1000 ]; then warn "Windows has only ${_hav} MB available"
+else ok "Windows available memory ${_hav} MB"; fi
+_pmin=$(MSYS_NO_PATHCONV=1 powercfg.exe /q 27fa6203-3987-4dcc-918d-748559d549ec SUB_PROCESSOR PROCTHROTTLEMIN 2>/dev/null | tr -d '\r' | awk -F': ' '/Current AC/{print $2}')
+if [ -n "$_pmin" ] && [ $(( _pmin )) -gt 16 ]; then warn "CPU minimum state on AC is $(( _pmin ))% (clocks pinned; expected 5%) - the ASUS app may have reset it; re-run Server mode"
+else ok "CPU minimum state on AC: $(( ${_pmin:-5} ))%"; fi
+_kx=$("/c/Program Files/Tailscale/tailscale.exe" status --json 2>/dev/null | python -c "import sys,json,datetime as d;e=json.load(sys.stdin)['Self'].get('KeyExpiry');print(int((d.datetime.fromisoformat(e.replace('Z','+00:00'))-d.datetime.now(d.timezone.utc)).days) if e else 'never')" 2>/dev/null)
+case "$_kx" in never) ok "Tailscale key expiry disabled" ;; ''|*[!0-9-]*) warn "could not read Tailscale key expiry" ;; *) if [ "$_kx" -lt 30 ]; then fail "Tailscale node key expires in $_kx days - disable key expiry in the admin console or remote access dies"; else warn "Tailscale node key expires in $_kx days (disable key expiry in the admin console)"; fi ;; esac
+
 _emit "============================================================"
 # run-job.ps1 scrapes the last line matching SUMMARY for its status text and
 # for the Uptime Kuma heartbeat message, so emit one in that shape.
