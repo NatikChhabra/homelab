@@ -137,8 +137,8 @@ classify_bump() {
 {
   echo "#!/bin/bash"
   echo "# Staged by update-audit.sh on $(date -u +'%Y-%m-%dT%H:%M:%SZ')."
-  echo "# Run from an INTERACTIVE shell — docker pull needs the credential helper,"
-  echo "# which fails under Task Scheduler on this host."
+  echo "# Pulls go through docker-pull.sh: plain docker pull / compose pull fail on this host"
+  echo "# (broken credential helper, see CLAUDE.md section 6)."
   echo "# Only PATCH and MINOR updates are listed. MAJOR / RENAMED are excluded"
   echo "# by design and need an explicit decision; see update-audit.log."
   echo "set -euo pipefail"
@@ -267,7 +267,7 @@ for cname in $CONTAINERS; do
         {
           echo ""
           echo "# $cname : ${local_ver:-?} -> ${remote_ver:-?} ($bump)"
-          echo "cd '$workdir' && docker compose pull '$svc' && docker compose up -d '$svc'"
+          echo "bash /c/ServerData/Stacks/docker-pull.sh '$ref' && cd '$workdir' && docker compose up -d --no-deps '$svc'"
         } >> "$STAGE_FILE"
         STAGED_ANY=true
       else
