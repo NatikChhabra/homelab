@@ -8,7 +8,9 @@
 #   1. Full secret values (any value with length >= 6)
 #   2. First 8 characters of each value (catches prefix-only leaks)
 #
-# Never prints secret values — only reports locations and fingerprints.
+# Never prints secret values, not even a prefix -- only key names and a sha256 fingerprint.
+# Values are matched through a process-substitution pattern file, never put on a command line
+# (argv is visible to every process on the machine).
 
 set -euo pipefail
 
@@ -36,20 +38,23 @@ while IFS= read -r k; do
   [ -z "$v" ] && continue
   [ "${#v}" -lt 6 ] && continue
 
-  # Fingerprint: first 8 chars + sha256 of full value (full hash never printed)
+  # Fingerprint: first 8 hex chars of the value's sha256 (identifies the key's value without revealing it)
   FINGERPRINT=$(printf '%s' "$v" | sha256sum | cut -c1-8)
   PREFIX="${v:0:8}"
 
   # Check full value match
-  if grep -qF -- "$v" "$TARGET"; then
+  if grep -qF -f <(printf '%s
+' "$v") "$TARGET"; then
     echo "LEAK: ${k} full value in ${TARGET} (fingerprint:${FINGERPRINT})"
     COUNT=$((COUNT + 1))
     FAIL=1
   fi
 
   # Check 8-char prefix match (catches "redacted" patterns that leaked the prefix)
-  if [ "${#v}" -ge 8 ] && grep -qF -- "$PREFIX" "$TARGET"; then
-    echo "PARTIAL LEAK: ${k} prefix (${PREFIX}...) in ${TARGET} (fingerprint:${FINGERPRINT})"
+  if [ "${#v}" -ge 8 ] && grep -qF -f <(printf '%s
+' "$PREFIX") "$TARGET"; then
+    # 2026-11-03: this line used to echo the 8-char prefix itself -- exactly the leak CLAUDE.md bans
+    echo "PARTIAL LEAK: ${k} first 8 chars in ${TARGET} (fingerprint:${FINGERPRINT})"
     COUNT=$((COUNT + 1))
     FAIL=1
   fi
