@@ -30,18 +30,10 @@ DATESTAMP=$(date +%Y%m%d-%H%M%S)
 HELPER_IMAGE="${BV_HELPER_IMAGE:-valkey/valkey:9}"
 
 # Deliberately NOT backed up:
-#   immich_model-cache - downloaded ML models, ~820MB, regenerate on demand
+#   immich_model-cache - downloaded ML models (SigLIP2 + faces), regenerate on demand
 #   *_static           - build artefacts
 #   64-hex names       - anonymous volumes, no durable state
-#   minecraft_data     - ~15 GB, and almost all of it is a CurseForge modpack
-#                        unpacked into hundreds of jars that re-download on
-#                        demand. At 14-day retention it would put ~210 GB of
-#                        recoverable files onto a 180 GB drive and push every
-#                        other archive off it. The part that genuinely cannot
-#                        be recovered -- the world -- is backed up separately
-#                        and more often by minecraft/mc-backup.sh, which
-#                        server-audit.sh section 26 checks is actually running.
-SKIP_RE='^(immich_model-cache|wger_wger_static|minecraft_data|[0-9a-f]{64})$'
+SKIP_RE='^(immich_model-cache|wger_wger_static|[0-9a-f]{64})$'
 
 # App data that is bind-mounted rather than in a Docker volume, so volume
 # discovery alone would silently miss it. Vaultwarden is first on purpose.
@@ -52,7 +44,13 @@ SKIP_RE='^(immich_model-cache|wger_wger_static|minecraft_data|[0-9a-f]{64})$'
 # claim was false the moment it was written. A third-party WASM plugin set that
 # has to be re-sourced by hand after a restore is exactly the kind of state
 # this script exists to hold.
-BIND_DIRS="Vaultwarden AdGuard Traccar Immich Vikunja Navidrome"
+# Sync added 2026-11-01: the FileBrowser share (incl. "Important information_")
+# had no backup at all.
+BIND_DIRS="Vaultwarden AdGuard Traccar Immich Vikunja Navidrome Sync Actual Octo"
+# Regenerable bulk left out of the bind tars (2026-11-01 audit; ~60% of the store):
+# AdGuard query logs (stats + conf are kept), Immich thumbnails/transcodes (Immich
+# rebuilds them from the originals).
+BIND_EXCLUDES="--exclude=AdGuard/work/data/querylog.json* --exclude=Immich/thumbs --exclude=Immich/encoded-video --exclude=Octo/slskd/incomplete --exclude=Octo/slskd/downloads --exclude=Octo/slskd/logs --exclude=Octo/config/preview-copies"
 
 log() { printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOG_FILE"; }
 
@@ -79,17 +77,25 @@ verify() {  # $1=archive path -> 0 if it is a readable, non-empty tar.gz
 }
 
 # ---- 1. Named Docker volumes (discovered, not hardcoded) -------------------
-for VOL in $(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -Ev "$SKIP_RE" | sort); do
+# Docker not answering used to mean zero volumes and a green run. It is a failure, and so is a list far
+# shorter than usual (18 on 2026-11-03).
+VOLS=$(docker volume ls --format '{{.Name}}' 2>&1) || { log "  FAIL  docker volume ls -- docker unavailable: $VOLS"; BAD=$((BAD+1)); VOLS=; }
+NVOL=$(printf '%s
+' "$VOLS" | grep -Evc "$SKIP_RE|^$")
+[ "$NVOL" -lt 15 ] && { log "  FAIL  only $NVOL volumes discovered (expected about 18)"; BAD=$((BAD+1)); }
+for VOL in $(printf '%s
+' "$VOLS" | grep -Ev "$SKIP_RE|^$" | sort); do
   A="${VOL}_${DATESTAMP}.tar.gz"
   MSYS_NO_PATHCONV=1 docker run --rm \
     -v "${VOL}:/source:ro" -v "${BACKUP_DIR}:/backup" \
     --entrypoint sh "$HELPER_IMAGE" \
-    -c "tar -czf /backup/${A} -C /source ." >/dev/null 2>&1
-  if verify "$BACKUP_DIR/$A"; then
+    -c "tar -czf /backup/${A} $( [ "$VOL" = navidrome_data ] && echo --exclude=./cache ) -C /source ." >/dev/null 2>&1
+  rc=$?   # tar: 1 = a file changed while being read (archive still good), 2+ = error
+  if [ "$rc" -lt 2 ] && verify "$BACKUP_DIR/$A"; then
     sz=$(wc -c < "$BACKUP_DIR/$A" | tr -d ' ')
     BYTES=$((BYTES+sz)); OK=$((OK+1)); log "  ok    volume $VOL ($((sz/1024)) KB)"
   else
-    BAD=$((BAD+1)); log "  FAIL  volume $VOL -- archive missing or unreadable"
+    BAD=$((BAD+1)); log "  FAIL  volume $VOL -- tar exit $rc or archive missing/unreadable"
     rm -f "$BACKUP_DIR/$A" 2>/dev/null
   fi
 done
@@ -98,12 +104,14 @@ done
 for D in $BIND_DIRS; do
   [ -d "/c/ServerData/$D" ] || { log "  skip  bind   $D (not present)"; continue; }
   A="bind-${D}_${DATESTAMP}.tar.gz"
-  tar -czf "$BACKUP_DIR/$A" -C /c/ServerData "$D" 2>/dev/null
-  if verify "$BACKUP_DIR/$A"; then
+  # shellcheck disable=SC2086  # BIND_EXCLUDES is a deliberate word list
+  tar -czf "$BACKUP_DIR/$A" $BIND_EXCLUDES -C /c/ServerData "$D" 2>/dev/null
+  rc=$?
+  if [ "$rc" -lt 2 ] && verify "$BACKUP_DIR/$A"; then
     sz=$(wc -c < "$BACKUP_DIR/$A" | tr -d ' ')
     BYTES=$((BYTES+sz)); OK=$((OK+1)); log "  ok    bind   $D ($((sz/1024)) KB)"
   else
-    BAD=$((BAD+1)); log "  FAIL  bind   $D -- archive missing or unreadable"
+    BAD=$((BAD+1)); log "  FAIL  bind   $D -- tar exit $rc or archive missing/unreadable"
     rm -f "$BACKUP_DIR/$A" 2>/dev/null
   fi
 done
@@ -121,8 +129,8 @@ else
 fi
 
 # ---- 4. Prune ---------------------------------------------------------------
-PRUNED=$(find "$BACKUP_DIR" -name '*.tar.gz' -mtime +"$RETENTION_DAYS" 2>/dev/null | wc -l | tr -d ' ')
-find "$BACKUP_DIR" -name '*.tar.gz' -mtime +"$RETENTION_DAYS" -delete 2>/dev/null
+PRUNED=$(find "$BACKUP_DIR" -maxdepth 1 -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].tar.gz' -mtime +"$RETENTION_DAYS" 2>/dev/null | wc -l | tr -d ' ')
+find "$BACKUP_DIR" -maxdepth 1 -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].tar.gz' -mtime +"$RETENTION_DAYS" -delete 2>/dev/null
 [ "${PRUNED:-0}" -gt 0 ] && log "  pruned $PRUNED archive(s) older than ${RETENTION_DAYS} days"
 
 TOTAL=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
