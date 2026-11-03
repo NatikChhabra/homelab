@@ -97,17 +97,20 @@ if ($Mode -eq 'Server') {
         if (-not $s -or ($s | ? { $_ -in $mine })) { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses '94.140.14.14','94.140.15.15' }
     }
     tailscale set --accept-dns=false
-    # Everything stops except navidrome: the music library is on D: of this
-    # laptop, so Feishin keeps working offline at college. restart=no keeps
-    # the stopped ones down across reboots until Server mode puts it back.
-    $others = docker ps -a --format '{{.ID}} {{.Names}}' | ? { $_ -notmatch ' navidrome$' } | % { ($_ -split ' ')[0] }
+    # Everything stops except the music: navidrome plus the Octo stack. The library
+    # is on D: of this laptop, and since 2026-11-03 the phone (Octo app) and Feishin
+    # both reach it THROUGH Octo (:5274), so stopping Octo cut them off at college.
+    # Octo + yt-dlp-shim + slskd idle at ~1.1 GB and ~0% CPU. restart=no keeps the
+    # stopped ones down across reboots until Server mode puts it back.
+    $keep = ' (navidrome|octo|yt-dlp-shim|slskd)$'
+    $others = docker ps -a --format '{{.ID}} {{.Names}}' | ? { $_ -notmatch $keep } | % { ($_ -split ' ')[0] }
     if ($others) { docker update --restart=no $others | Out-Null; docker stop $others | Out-Null }
     powercfg /setactive $BAL
     powercfg /change standby-timeout-ac 30; powercfg /change standby-timeout-dc 10
     powercfg /change monitor-timeout-ac 10; powercfg /change monitor-timeout-dc 3
     powercfg /change hibernate-timeout-dc 60
     powercfg /setacvalueindex $BAL SUB_BUTTONS LIDACTION 1; powercfg /setdcvalueindex $BAL SUB_BUTTONS LIDACTION 1; powercfg /setactive $BAL
-    Log 'college mode on; only navidrome running, DNS automatic, sleep enabled'
+    Log 'college mode on; only music running (navidrome + octo stack), DNS automatic, sleep enabled'
 }
 
 # Self-closing popup (8 s). A modal MessageBox kept the task "running" until
