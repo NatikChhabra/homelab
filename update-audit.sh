@@ -119,6 +119,9 @@ reg_remote_version() {
 classify_bump() {
   local a="$1" b="$2"
   [ -z "$a" ] || [ -z "$b" ] && { printf 'UNKNOWN'; return; }
+  # LinuxServer rebuild: same upstream version, only the -lsNNN build number moved (base-image
+  # patches). 5.3.0_v2.1.2-ls485 -> -ls486 was held as UNKNOWN on 2026-11-03; it is a PATCH.
+  case "$a|$b" in *-ls[0-9]*\|*-ls[0-9]*) [ "${a%-ls*}" = "${b%-ls*}" ] && { printf 'PATCH'; return; } ;; esac
   # strip any leading v and any trailing -ls123 / -suffix build metadata
   local ca cb
   ca=$(printf '%s' "$a" | sed 's/^[vV]//' | sed 's/[-+].*$//')
