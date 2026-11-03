@@ -119,6 +119,23 @@ After editing `docker-compose.yml`, apply with `docker compose up -d` in that st
 - `homarr` SECRET_ENCRYPTION_KEY and `vikunja` VIKUNJA_SERVICE_PUBLICURL come from each stack's
   gitignored `.env` since 2026-11-01 (they used to be hardcoded in the compose files).
 - Don't delete/rewrite files under app data directories — live application state.
+- Outside git, set 2026-11-03 (deep audit; backups of the old values in
+  logs/acl-pre-hardening-20261103T092741Z/). Do not undo without a reason:
+  - Defender excludes only the busy app-data folders under C:\ServerData (not the whole tree):
+    Sync (uploads), Stacks (SYSTEM-run scripts) and Tools are scanned; daily quick scan 02:15.
+    D:\Media and D:\Backups stay excluded; the weekly audit flags any executable/archive in D:\Media.
+  - SMB shares MediaDrive/ServerData grant only Naiti + servershare, Users only Naiti +
+    Administrators (no Everyone). C:\ServerData\Tools: Naiti/SYSTEM/Administrators full, Users read.
+    Local users CodexSandboxOffline/Online disabled. Firewall rule OmniRoute-Tailscale-20128 removed.
+  - Jellyfin network.xml: LocalNetworkSubnets 192.168.1.0/24, 172.16.0.0/12, 100.64.0.0/10; IPv6 off;
+    PublishedServerUriBySubnet all=http://192.168.1.107:8096 (Docker NAT hides client IPs, so
+    per-subnet entries never match). LAN answers ~1 min after localhost on a restart; that is normal.
+  - Octo: mem_limit 1g, ENABLE_SYNC_CATALOG=false (only Symfonium used it). Radio warm-up logs
+    '0/1 stations' every minute: upstream behaviour (station tracks unresolved), harmless.
+  - Prowlarr: 14 enabled indexers, all TV/movie/anime; adult and no-app indexers removed or disabled
+    (backup logs/prowlarr-indexers-before-*.json).
+  - The three light music jobs (Offline Playlists, Music Dupe Guard, LB Discovery) run on battery
+    and stay enabled in College mode.
 
 **Session hygiene:**
 - Use `/clear` for unrelated tasks; use `/compact` at natural breakpoints and steer it.
