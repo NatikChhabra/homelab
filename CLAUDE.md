@@ -233,7 +233,9 @@ gitignored path, force-add it in the same breath.
   short bursts under load; the disk itself is healthy (0 read errors). A new port and a new
   enclosure (2026-11-03) did not help, and the owner chose to leave it. Each dead mount makes
   mount-watchdog restart Docker Desktop, which restarts every container, AdGuard included
-  (~2 min of no family DNS). Untried option: force the USB mass-storage (BOT) driver instead of UAS.
+  (~2 min). Family DNS survives it: the router hands out 94.140.14.14 (AdGuard public DNS,
+  ad-blocking, verified 2026-11-03) as the second server. The Airtel router has no SSH/telnet
+  (only its web UI), so AdGuard Home cannot run on it. Untried option: force the USB mass-storage (BOT) driver instead of UAS.
 - **Crashes:** one blue screen in 120 days (0xA, 2026-11-02 11:01 IST, minidump
   C:\Windows\Minidump\110226-13390-01.dmp): `!analyze` names only nt!RtlpxVirtualUnwind in
   svchost, no third-party driver. Every other unexpected restart has bugcheck 0 (power/sleep).
