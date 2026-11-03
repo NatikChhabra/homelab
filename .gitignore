@@ -24,6 +24,8 @@
 !*.ps1
 !*.py
 !glances-kiosk.bat
+# scripts/control-room.vbs: the Startup shortcut and mode.ps1 launch it (2026-11-03).
+!*.vbs
 
 # Config files a compose file bind-mounts. server-room/glances.conf was ignored
 # by the catch-all above while server-room/docker-compose.yml required it, so a
@@ -69,4 +71,6 @@ secrets.env
 *.log
 *.txt
 *.json
-jarvis/ha-config/custom_components/tuya-local/
+# Local archive of retired stacks and old copies (it holds a retired .env). The allowlist
+# above would let its *.sh/*.yml back in; this repo is public, so the whole tree stays out.
+archive/
