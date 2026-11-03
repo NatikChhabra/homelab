@@ -438,7 +438,7 @@ sec "10. Rolling window automation"
 # Incident 2026-07-27: the task exited 1 every 20 minutes for hours (season-pack
 # cancels returning 404) and nobody noticed, because a failing scheduled task is
 # invisible unless you go looking.
-for t in "ServerData - Rolling Window" "ServerData - Orphan Cleanup" "ServerData - Update Audit" "ServerData - Weekly Audit" "ServerData - Daily Backup" "ServerData - Mount Watchdog" "ServerData - Shrink Library" "ServerData - Immich Auto Albums"; do
+for t in "ServerData - Rolling Window" "ServerData - Orphan Cleanup" "ServerData - Update Audit" "ServerData - Weekly Audit" "ServerData - Daily Backup" "ServerData - Mount Watchdog" "ServerData - Shrink Library" "ServerData - Immich Auto Albums" "ServerData - Offline Playlists" "ServerData - Music Dupe Guard" "ServerData - LB Discovery"; do
   r=$(powershell.exe -NoProfile -Command "\$i=Get-ScheduledTaskInfo -TaskName '$t' -EA SilentlyContinue; if(\$i){\$i.LastTaskResult}else{'missing'}" 2>/dev/null | tr -d '\r ')
   # Windows returns status codes here, not just exit codes:
   #   267009 SCHED_S_TASK_RUNNING   - running right now (this audit is itself
@@ -463,6 +463,10 @@ for t in "ServerData - Rolling Window" "ServerData - Orphan Cleanup" "ServerData
     *)       fail "task '$t' last result $r (non-zero = the job failed)" ;;
   esac
 done
+# 2026-11-03: College mode disables most server tasks and Server mode re-enables them. A task left
+# Disabled (a forgotten switch, a manual test) never runs and never reports; say so.
+_dis=$(powershell.exe -NoProfile -Command "(Get-ScheduledTask -TaskName 'ServerData - *' | ? State -eq 'Disabled').TaskName -join ', '" 2>/dev/null | tr -d '\r')
+if [ -n "$_dis" ]; then warn "scheduled task(s) disabled: $_dis (College mode left on, or switched off by hand?)"; else ok "no ServerData task is disabled"; fi
 
 if [ -f /c/ServerData/Stacks/stuck-episodes.txt ]; then
   # grep -c exits 1 on zero matches, which under `set -o pipefail` used to leave
@@ -1203,7 +1207,7 @@ case "$_kx" in never) ok "Tailscale key expiry disabled" ;; ''|*[!0-9-]*) warn "
 # 2026-11-03 audit: D:\Media is excluded from Defender (scanning video over the flaky USB bridge
 # is too heavy), so nothing scans torrent payloads. A media tree never needs executables, scripts
 # or archives: any that appear are flagged here with their paths so they can be scanned by hand.
-_mx=$(find /d/Media/torrents /d/Media/library -type f \( -iname '*.exe' -o -iname '*.scr' -o -iname '*.bat' -o -iname '*.cmd' -o -iname '*.lnk' -o -iname '*.vbs' -o -iname '*.js' -o -iname '*.ps1' -o -iname '*.msi' -o -iname '*.com' -o -iname '*.zip' -o -iname '*.rar' \) 2>/dev/null)
+_mx=$(find /d/Media/torrents /d/Media/library /d/Media/music -type f \( -iname '*.exe' -o -iname '*.scr' -o -iname '*.bat' -o -iname '*.cmd' -o -iname '*.lnk' -o -iname '*.vbs' -o -iname '*.js' -o -iname '*.ps1' -o -iname '*.msi' -o -iname '*.com' -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.iso' -o -iname '*.dll' -o -iname '*.hta' -o -iname '*.jar' \) 2>/dev/null)
 if [ -z "$_mx" ]; then ok "no executables, scripts or archives in D:\Media (Defender excludes that tree)"
 else warn "$(printf '%s\n' "$_mx" | wc -l) executable/script/archive file(s) in D:\Media, which Defender skips - scan: $(printf '%s\n' "$_mx" | head -3 | tr '\n' ' ')"; fi
 
