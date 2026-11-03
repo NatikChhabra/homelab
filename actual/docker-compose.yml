@@ -1,0 +1,22 @@
+services:
+  # Actual Budget, added 2026-11-02 -- personal budgeting (INR now, MYR at uni).
+  # Local-first: each browser keeps a full copy of the budget and syncs here, so
+  # it keeps working offline (college mode, flaky hostel Wi-Fi) and catches up
+  # when the server is reachable again.
+  # Host-only, like Vaultwarden: the app needs a secure context (HTTPS), so the
+  # way in is Tailscale serve -> https://arjun-rajput.tail971fea.ts.net:5006
+  # The server password is set by the owner on first open; it is not stored here.
+  actual:
+    image: actualbudget/actual-server:latest
+    container_name: actual
+    restart: always
+    mem_limit: 512m
+    ports:
+      - "127.0.0.1:5006:5006"
+    volumes:
+      - C:/ServerData/Actual:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5006/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
