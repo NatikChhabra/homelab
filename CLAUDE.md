@@ -60,7 +60,9 @@ physical disk from the live data.
 - `Stacks/vikunja/` — task manager.
 - `Stacks/server-room/` — glances host-metrics container.
 - `Stacks/adguard/` — AdGuard Home (DNS for every device; 53 tcp/udp, UI on 3080).
-- `Stacks/immich/` — photos (owner's rule: do not connect to or poke Immich during audits).
+- `Stacks/immich/` — photos. Owner's rule: sessions do not connect to or poke Immich. The one
+  exception is server-audit.sh's read-only integrity check in the scheduled weekly run; run the
+  audit by hand with `AUDIT_SKIP_IMMICH=1` to leave Immich alone entirely.
 - `Stacks/navidrome/` — music server (4533); `Stacks/octo/` — Octo proxy, slskd, yt-dlp-shim (see Octo below).
 - `Stacks/actual/` — Actual budget; `Stacks/portainer/` — Portainer (9443).
 
