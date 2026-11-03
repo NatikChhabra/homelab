@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('rolling-window', 'update-audit', 'orphan-cleanup', 'server-audit', 'backup-volumes', 'mc-backup')]
+    [ValidateSet('rolling-window', 'update-audit', 'orphan-cleanup', 'server-audit', 'backup-volumes', 'shrink-library', 'lb-discovery', 'music-dupe-guard')]
     [string]$Job
 )
 
@@ -122,34 +122,25 @@ $Jobs = @{
         }
         Timeout   = 1800
     }
-    'mc-backup'      = @{
-        Script    = '/c/ServerData/Stacks/minecraft/mc-backup.sh'
-        # DELIBERATELY EMPTY, and this is the one place that needs explaining
-        # rather than copying the pattern above. The other jobs learned the
-        # hard way that '' means no monitoring at all. Here there is no Uptime
-        # Kuma push token yet because none has been created, and inventing a
-        # token name would make every run emit "secrets.env has no usable
-        # value" -- alert noise that gets ignored, which is worse than silence.
-        #
-        # The gap is covered instead: server-audit.sh section 26 fails if no
-        # world archive newer than 8 days exists in D:\Backups\minecraft. A
-        # silently dead backup therefore surfaces in the weekly audit rather
-        # than never. Create KUMA_PUSH_MC_BACKUP and set it here if you want
-        # same-day notice instead of same-week.
-        PushTokenName = ''
-        Env       = @{
-            # D: on purpose, same reasoning as backup-volumes: a different
-            # physical disk from the C: SSD holding the live world.
-            'MC_BACKUP_DIR'     = '/d/Backups/minecraft'
-            # 7 rather than 14. A world tar is a few GB and D: has 180 GB free
-            # shared with the media library; the modpack itself is excluded and
-            # re-downloadable, so only the world is being retained here.
-            'MC_RETENTION_DAYS' = '7'
-            'MC_LOG_FILE'       = '/c/ServerData/Stacks/minecraft/mc-backup.log'
-        }
-        # A few GB of world through gzip. Generous; the script exits in seconds
-        # when the volume does not exist yet.
-        Timeout   = 1800
+    # Added 2026-11-01 (audit): the GPU shrinker ran straight from bash, always
+    # exited 0 and had no heartbeat, so a broken run looked healthy.
+    'music-dupe-guard' = @{
+        Script    = '/c/ServerData/Stacks/scripts/music-dupe-guard.sh'   # Octo twin-heart duplicates -> trash (2026-11-02)
+        PushTokenName = 'KUMA_PUSH_MUSIC_DUPE_GUARD'
+        Env       = @{}
+        Timeout   = 600
+    }
+    'lb-discovery' = @{
+        Script    = '/c/ServerData/Stacks/scripts/lb-discovery.sh'   # ListenBrainz Weekly -> Octo (replaced Explo 2026-11-02)
+        PushTokenName = 'KUMA_PUSH_LB_DISCOVERY'
+        Env       = @{}
+        Timeout   = 900
+    }
+    'shrink-library' = @{
+        Script    = '/c/ServerData/Stacks/shrink-library.sh'
+        PushTokenName = 'KUMA_PUSH_SHRINK_LIBRARY'
+        Env       = @{}
+        Timeout   = 18000
     }
     'orphan-cleanup' = @{
         Script    = '/c/ServerData/Stacks/orphan-cleanup.sh'
@@ -311,7 +302,12 @@ try {
     # timestamped per run, so appending never mixes two runs together.
     $header | Out-File -FilePath $RunLog -Encoding utf8 -Append
 
-    $output = & $BashExe $Def.Script *>&1
+    # 2026-11-01: with $ErrorActionPreference='Stop' (line 24), Windows PowerShell
+    # 5.1 turns any line the bash job writes to stderr into a terminating error,
+    # so a job that merely logged a warning was aborted mid-run. Native stderr is
+    # data here, not an exception: relax the preference just for this call.
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $output = & $BashExe $Def.Script 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $prevEAP }
     $exitCode = $LASTEXITCODE
     if ($null -eq $exitCode) { $exitCode = 0 }
     $output | Out-File -FilePath $RunLog -Append -Encoding utf8
