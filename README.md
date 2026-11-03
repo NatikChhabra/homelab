@@ -151,7 +151,12 @@ jobs, `docker-pull.sh`) and it's a standard Compose tree.
 
 Scheduled through Windows Task Scheduler (tasks named `ServerData - <Job>`). The jobs marked
 "run-job" go through `run-job.ps1`, which captures a per-run transcript, writes
-`logs/<job>-status.json`, pings the job's Uptime Kuma push monitor (the SUMMARY line becomes th| Job | Cadence | What it does |
+`logs/<job>-status.json`, pings the job's Uptime Kuma push monitor (the SUMMARY line becomes the
+heartbeat message), logs failures to the Windows event log, refuses to start while the previous
+run is still going, and (since 2026-11-03) kills a job that runs past its Timeout and records it
+as failed. Mount Watchdog also flags any run-job job that has gone stale.
+
+| Job | Cadence | What it does |
 |---|---|---|
 | Offline Playlists (run-job) | every 2 min | Keeps the Navidrome playlist "Everything" equal to the library; the phone's Octo app keeps it downloaded. |
 | Mount Watchdog | every 3 min + at boot | Confirms the media disk is really mounted, repairs it, and flags stale jobs. |
@@ -167,10 +172,7 @@ Scheduled through Windows Task Scheduler (tasks named `ServerData - <Job>`). The
 | Boot Check | at logon (+10 min) | Runs the full audit after a reboot and copies the result to Sync (viewable at :8095). |
 | Keep Awake | at logon (runs continuously) | Stops Modern Standby from sleeping the server. |
 | Power Shed | at logon + on power events | Sheds load (stops encodes) on battery. |
-| UDP Exhaustion Snapshot | on Tcpip event 4266 | Records which process ran the host out of UDP ports. |ily | Removes leftovers from removed downloads. |
-| Update Audit | daily | Compares local image digests against the registry. |
-| Daily Backup | nightly | Archives volumes and bind mounts, 14-day retention. |
-| Weekly Audit | Sundays 05:00 | Full read-only health audit. |
+| UDP Exhaustion Snapshot | on Tcpip event 4266 | Records which process ran the host out of UDP ports. |
 
 Updates are **never** applied automatically. The audit reports what changed and
 classifies it; anything beyond a patch bump waits for a human.
