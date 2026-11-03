@@ -60,6 +60,7 @@ if fresh and DAILY:
 stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%FT%TZ")
 if not rows:
     print(f"{stamp} ListenBrainz has no Weekly Exploration or recommendations for {USER} yet; nothing sent.")
+    print(f"{stamp} SUMMARY sent=0 (no Weekly Exploration from ListenBrainz yet)")
     sys.exit(0)
 
 buf = io.StringIO()
@@ -93,6 +94,7 @@ body = (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="listen
 status, raw = post("/api/admin/imports/file", body, f"multipart/form-data; boundary={b}")
 res = json.loads(raw or b"{}")
 print(f"{stamp} HTTP {status}: {res.get('message')} ({len(rows)} songs sent)")
+print(f"{stamp} SUMMARY sent={len(rows)} HTTP {status}")
 if not res.get("ok"):
     sys.exit(1)
 # Keep each list as a Navidrome playlist and fetch what is missing (FLAC first). Idempotent:
