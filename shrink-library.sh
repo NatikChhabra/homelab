@@ -34,6 +34,10 @@ DRY=${DRY_RUN:-0}
 # Each encode now gets ENCODE_TIMEOUT seconds (the longest real one took ~7 min); a file that
 # times out goes on SKIP_LIST and is not retried until someone removes its line.
 ENCODE_TIMEOUT=${ENCODE_TIMEOUT:-1800}
+# Stay inside run-job.ps1's 18000 s Timeout: an encode that could overrun RUN_BUDGET is not started,
+# because run-job's kill stops this script but not ffmpeg inside the container (2026-11-03).
+RUN_BUDGET=${RUN_BUDGET:-16200}
+RUN_START=$(date +%s)
 SKIP_LIST=/c/ServerData/Stacks/logs/shrink-library-skip.txt
 log(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
 
@@ -61,19 +65,21 @@ while IFS= read -r f; do
   [ $(( $(date +%s) - mtime )) -lt 86400 ] && continue
   if [ -f "$SKIP_LIST" ] && grep -Fxq -- "$f" "$SKIP_LIST"; then log "skip (timed out before, see $SKIP_LIST): $f"; continue; fi
   if [ "$DRY" = 1 ]; then log "would shrink: $f ($((size/1048576)) MB, $codec)"; done_n=$((done_n+1)); continue; fi
+  if [ $(( $(date +%s) - RUN_START + ENCODE_TIMEOUT + 60 )) -gt "$RUN_BUDGET" ]; then log "time budget reached (${RUN_BUDGET}s) - stopping before the next encode"; break; fi
 
   log "encoding: $f ($((size/1048576)) MB, $codec)"
   res=$(docker exec jellyfin sh -c '
     f="$1"; cq="$2"; lim="$3"; FF=/usr/lib/jellyfin-ffmpeg/ffmpeg; FP=/usr/lib/jellyfin-ffmpeg/ffprobe
-    ext="${f##*.}"; tmp="${f%.*}.shrinking.$ext"
+    ext="${f##*.}"; tmp="${f%.*}.shrinking.$ext"; own=$(stat -c %u:%g "$f")
     timeout -k 30 "$lim" $FF -v error -nostdin -y -hwaccel cuda -hwaccel_output_format cuda -i "$f" -map 0 -c copy -c:v:0 hevc_nvenc -preset p7 -tune hq \
         -rc vbr -cq "$cq" -b:v 0 -spatial_aq 1 -temporal_aq 1 -aq-strength 8 -rc-lookahead 32 -bf 4 -b_ref_mode middle \
         -tag:v:0 hvc1 "$tmp"; rc=$?
-    if [ "$rc" -ne 0 ]; then rm -f "$tmp"; [ "$rc" = 124 ] && echo "FAIL timeout after ${lim}s" || echo "FAIL encode (rc $rc)"; exit; fi
+    if [ "$rc" -ne 0 ]; then rm -f "$tmp" "${f%.*}.shrinking.nfo"; case "$rc" in 124|137) echo "FAIL timeout after ${lim}s (rc $rc)" ;; *) echo "FAIL encode (rc $rc)" ;; esac; exit; fi
     d1=$($FP -v error -show_entries format=duration -of csv=p=0 "$f"); d2=$($FP -v error -show_entries format=duration -of csv=p=0 "$tmp")
     s1=$(stat -c %s "$f"); s2=$(stat -c %s "$tmp")
     ok=$(awk -v a="$d1" -v b="$d2" -v x="$s1" -v y="$s2" "BEGIN{print ((a-b<2 && b-a<2) && y < x*0.9) ? 1 : 0}")
-    if [ "$ok" = 1 ]; then mv -f "$tmp" "$f"; echo "OK $s1 $s2"; else rm -f "$tmp"; echo "KEPT original (dur $d1 vs $d2, size $s1 vs $s2)"; fi' _ "$f" "$CQ" "$ENCODE_TIMEOUT")
+    rm -f "${f%.*}.shrinking.nfo"   # Jellyfin writes metadata for the temp file while it exists
+    if [ "$ok" = 1 ]; then mv -f "$tmp" "$f"; chown "$own" "$f"; echo "OK $s1 $s2"; else rm -f "$tmp"; echo "KEPT original (dur $d1 vs $d2, size $s1 vs $s2)"; fi' _ "$f" "$CQ" "$ENCODE_TIMEOUT")
   case "$res" in
     OK*) read -r _ s1 s2 <<< "$res"; saved=$((saved + s1 - s2)); log "  done: $((s1/1048576)) -> $((s2/1048576)) MB" ;;
     *)   log "  $res"; case "$res" in FAIL*|"") fails=$((fails+1)) ;; esac
