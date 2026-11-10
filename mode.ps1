@@ -14,6 +14,15 @@ $ErrorActionPreference = 'Continue'
 $log = 'C:\ServerData\Stacks\logs\mode.log'
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 function Log($m) { Add-Content $log ("{0}  [{1}] {2}" -f (Get-Date -Format s), $Mode, $m) }
+# Engine probe with a hard timeout (review 2026-11-11): an untimed `docker version`
+# blocks for minutes on a hung engine, so a "5-minute wait" could hold the switch
+# far longer while the toast had already promised ~20 s.
+function Test-Engine {
+    $p = Start-Process docker -ArgumentList 'version', '-f', '{{.Server.Version}}' -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\mode-dv.txt" -RedirectStandardError "$env:TEMP\mode-dv.err"
+    if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch {}; return $false }
+    return [bool]((Get-Content "$env:TEMP\mode-dv.txt" -Raw -ErrorAction SilentlyContinue) -match '\d')
+}
+function Wait-Engine { $end = (Get-Date).AddMinutes(5); while ((Get-Date) -lt $end) { if (Test-Engine) { return $true }; Start-Sleep 5 }; return $false }
 
 # Instant feedback (2026-11-02): a switch takes 15-30 s and the popup below only
 # comes at the end, so it looked like nothing was happening.
@@ -58,7 +67,7 @@ if ($Mode -eq 'Server') {
     # putting that back is exact.
     # 'docker info' prints client text even with the daemon down, so it always passed at once (2026-11-03 check).
     # The server version is empty until the daemon really answers.
-    for ($i = 0; $i -lt 60 -and -not (docker version -f '{{.Server.Version}}' 2>$null); $i++) { Start-Sleep 5 }
+    $null = Wait-Engine
     $all = docker ps -aq
     if ($all) { docker update --restart=always $all | Out-Null; docker start $all | Out-Null }
     $down = docker ps -a --filter status=exited -q
@@ -109,11 +118,11 @@ if ($Mode -eq 'Server') {
     # 2026-11-10: wait for the engine like the Server branch does, and check the
     # result. This used to run once and report success even when Docker was not
     # answering, leaving every container at restart=always.
-    for ($i = 0; $i -lt 60 -and -not (docker version -f '{{.Server.Version}}' 2>$null); $i++) { Start-Sleep 5 }
+    $null = Wait-Engine
     $others = docker ps -a --format '{{.ID}} {{.Names}}' | ? { $_ -notmatch $keep } | % { ($_ -split ' ')[0] }
     if ($others) { docker update --restart=no $others | Out-Null; docker stop $others | Out-Null }
     $still = docker ps --format '{{.Names}}' | ? { " $_" -notmatch $keep }
-    if (-not (docker version -f '{{.Server.Version}}' 2>$null)) { Log 'WARN docker not answering - server containers NOT stopped'; $note = ' Docker did not answer: the server apps may still be running.' }
+    if (-not (Test-Engine)) { Log 'WARN docker not answering - server containers NOT stopped'; $note = ' Docker did not answer: the server apps may still be running.' }
     elseif ($still) { Log "WARN still running: $($still -join ', ')"; $note = " $(@($still).Count) server app(s) did not stop." }
     powercfg /setactive $BAL
     powercfg /change standby-timeout-ac 30; powercfg /change standby-timeout-dc 10
