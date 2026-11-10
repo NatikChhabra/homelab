@@ -3,6 +3,9 @@ services:
     image: nicolargo/glances:latest
     container_name: glances
     restart: always
+    # 2026-11-10: capped. Had no limit and grew to ~650 MB in 5 days (baseline ~120 MiB).
+    mem_limit: 384m
+    memswap_limit: 384m
     # Host PID namespace, so the process list is the machine's rather than this
     # container's one process.
     pid: host
