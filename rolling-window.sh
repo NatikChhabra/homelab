@@ -762,7 +762,7 @@ SERIES_TMP=$(mktemp)
 sonarr "/api/v3/series" | jq_c -c '.[] | {id, title, monitored, rootFolderPath, path, imdbId, seriesType}' > "$SERIES_TMP"
 
 TOTAL_KEEP=0; TOTAL_UNMON=0; TOTAL_DEL=0; TOTAL_DORMANT=0; TOTAL_CANCEL=0; TOTAL_DROP=0; TOTAL_STUCK=0
-TOTAL_PACKSAFE=0; TOTAL_DUBKEEP=0; TOTAL_DUBGRAB=0
+TOTAL_PACKSAFE=0; TOTAL_DUBKEEP=0; TOTAL_DUBGRAB=0; TOTAL_GAP=0
 DUBTMP=$(mktemp); GRABTMP=$(mktemp)
 STUCK_SKIPS=0
 STUCK_TMP=$(mktemp)
@@ -911,14 +911,10 @@ while IFS= read -r srow; do
   fi
   if [ "$ACTIVE_SEASON" -ge 0 ]; then
     log "  active season : S${ACTIVE_SEASON}  ($REMAINING unwatched episodes remaining)"
-    if [ "$UNLOCKED_SEASON" -ge 0 ]; then
-      if [ "$WINDOW_UNLIMITED" = "true" ]; then
-        log "  UNLOCK        : window unlimited -> S${UNLOCKED_SEASON} promoted to active alongside S${ACTIVE_SEASON}"
-      else
-        log "  UNLOCK        : S${ACTIVE_SEASON} within $WINDOW_SIZE of done -> S${UNLOCKED_SEASON} promoted to active"
-      fi
-    elif [ "$WINDOW_UNLIMITED" = "true" ]; then
-      log "  later seasons : DORMANT (no further REQUESTED season after S${ACTIVE_SEASON})"
+    if [ "$WINDOW_UNLIMITED" = "true" ]; then
+      log "  UNLOCK        : window unlimited -> every requested season from S${ACTIVE_SEASON} on is active"
+    elif [ "$UNLOCKED_SEASON" -ge 0 ]; then
+      log "  UNLOCK        : S${ACTIVE_SEASON} within $WINDOW_SIZE of done -> S${UNLOCKED_SEASON} promoted to active"
     else
       log "  later seasons : DORMANT (S${ACTIVE_SEASON} has $REMAINING left, unlock at <=$WINDOW_SIZE)"
     fi
@@ -965,6 +961,12 @@ while IFS= read -r srow; do
     season_active=false
     [ "$sn" -eq "$ACTIVE_SEASON" ] && season_active=true
     [ "$UNLOCKED_SEASON" -ge 0 ] && [ "$sn" -eq "$UNLOCKED_SEASON" ] && season_active=true
+    # 2026-11-10: with no window, EVERY requested season after the active one is
+    # active. The unlock above only ever reaches ACTIVE+1, so a third requested
+    # season (After Life S3, requested 2026-11-06 with S1-S2 unwatched) was
+    # treated as dormant: unmonitored, and its grabbed season pack cancelled.
+    [ "$WINDOW_UNLIMITED" = "true" ] && [ "$ACTIVE_SEASON" -ge 0 ] && [ "$sn" -gt "$ACTIVE_SEASON" ] \
+      && season_requested "$sn" && season_active=true
 
     if [ "$season_active" != "true" ]; then
       if [ "$emon" = "true" ]; then
@@ -1102,6 +1104,22 @@ while IFS= read -r srow; do
     fi
   fi
 
+  # --- REQUEST GUARD (2026-11-10, After Life S3) ----------------------------
+  # With no window, every unwatched episode of a requested season must end this
+  # run either on disk or monitored. One that is neither will never be fetched,
+  # and the user only finds out when the show never arrives. Fresh read, so it
+  # judges what the walk above actually left behind. Fails the run -> Kuma alert.
+  if [ "$WINDOW_UNLIMITED" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+    while IFS='|' read -r _e _s _n _m _h; do
+      [ -z "${_e:-}" ] && continue
+      season_requested "$_s" || continue
+      [ "$_h" = "true" ] || [ "$_m" = "true" ] && continue
+      was_watched "$sid" "$jfid" "$_s" "$_n" && continue
+      log "  REQUEST GAP     S${_s}E${_n}  (requested season, no file, NOT monitored - would never download)"
+      TOTAL_GAP=$((TOTAL_GAP+1)); EXIT_CODE=1
+    done < <(sonarr "/api/v3/episode?seriesId=$sid" | jq_c -r '.[] | select(.seasonNumber > 0) | "\(.id)|\(.seasonNumber)|\(.episodeNumber)|\(.monitored)|\(.hasFile)"')
+  fi
+
 done < "$SERIES_TMP"
 
 log "=========================================================="
@@ -1203,7 +1221,7 @@ if [ "$TOTAL_STUCK" -gt 0 ]; then
 fi
 
 log "Watch ledger: added $LEDGER_ADDED new confirmations this run"
-log "SUMMARY  window=$TOTAL_KEEP  unmonitored=$TOTAL_UNMON  dormant=$TOTAL_DORMANT  deleted=$TOTAL_DEL  cancelled-downloads=$TOTAL_CANCEL  pack-safe-skips=$TOTAL_PACKSAFE  dub-kept=$TOTAL_DUBKEEP  dub-grabbed=$TOTAL_DUBGRAB  dropped-files=$TOTAL_DROP  unimportable-cleared=$TOTAL_UNIMPORTABLE  searched=$SEARCH_COUNT  STUCK=$TOTAL_STUCK  skipped-ambiguous=$SKIPPED"
+log "SUMMARY  window=$TOTAL_KEEP  unmonitored=$TOTAL_UNMON  dormant=$TOTAL_DORMANT  deleted=$TOTAL_DEL  cancelled-downloads=$TOTAL_CANCEL  pack-safe-skips=$TOTAL_PACKSAFE  dub-kept=$TOTAL_DUBKEEP  dub-grabbed=$TOTAL_DUBGRAB  dropped-files=$TOTAL_DROP  unimportable-cleared=$TOTAL_UNIMPORTABLE  searched=$SEARCH_COUNT  STUCK=$TOTAL_STUCK  request-gaps=$TOTAL_GAP  skipped-ambiguous=$SKIPPED"
 if [ "$DRY_RUN" = "true" ]; then
   log "DRY_RUN=true — nothing was changed or deleted. Report only."
 else
