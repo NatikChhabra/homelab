@@ -648,6 +648,18 @@ queue_id_for() { awk -F'|' -v e="$1" '$1==e {print $2; exit}' "$QUEUE_TMP"; }
 # queue_dlid_for <episodeId> -> prints the downloadId backing it, or empty
 queue_dlid_for() { awk -F'|' -v e="$1" '$1==e {print $3; exit}' "$QUEUE_TMP"; }
 
+# season_fresh <season>: no file, nothing watched, nothing queued in that season
+# of the current series ($ORDERED, $WATCHED_SEASONS) -- a brand-new request.
+season_fresh() {
+  local s="$1" e
+  case " $WATCHED_SEASONS " in *" $s "*) return 1 ;; esac
+  printf '%s\n' "$ORDERED" | awk -F'|' -v s="$s" '$2==s && $5=="true"{f=1} END{exit !f}' && return 1
+  for e in $(printf '%s\n' "$ORDERED" | awk -F'|' -v s="$s" '$2==s{print $1}'); do
+    [ -n "$(queue_id_for "$e")" ] && return 1
+  done
+  return 0
+}
+
 # queue_title_for <episodeId> -> prints the release title of its queue row
 queue_title_for() { awk -F'|' -v e="$1" '$1==e {print $4; exit}' "$QUEUE_TMP"; }
 
@@ -853,10 +865,12 @@ while IFS= read -r srow; do
 
   # --- watch position = furthest confirmed-watched episode ------------------
   POS_S=0; POS_E=0; WATCHED_COUNT=0
+  WATCHED_SEASONS=""   # seasons with any watched episode: never a 'fresh request'
   while IFS='|' read -r eid sn en emon ehas efid; do
     [ -z "${eid:-}" ] && continue
     if was_watched "$sid" "$jfid" "$sn" "$en"; then
       WATCHED_COUNT=$((WATCHED_COUNT+1))
+      case " $WATCHED_SEASONS " in *" $sn "*) ;; *) WATCHED_SEASONS="$WATCHED_SEASONS $sn" ;; esac
       if [ "$sn" -gt "$POS_S" ] || { [ "$sn" -eq "$POS_S" ] && [ "$en" -gt "$POS_E" ]; }; then
         POS_S=$sn; POS_E=$en
       fi
@@ -1021,8 +1035,11 @@ while IFS= read -r srow; do
         # first, and among singles the profile score puts dub above sub.
         # 2026-11-10: standard shows too when the window is unlimited (the whole
         # season is wanted anyway). After Life S3 exists almost only as a pack.
+        # Only if no other season holds this run's one season-search slot, so
+        # SEASON_EIDS always belongs to SEASON_TO_SEARCH (review 2026-11-11).
         if [ "$ANIME_SEASON_SEARCH" = "true" ] && [ "$SEARCH_MISSING" = "true" ] \
-           && { [ "$stype" = "anime" ] || [ "$WINDOW_UNLIMITED" = "true" ]; }; then
+           && { [ "$stype" = "anime" ] || [ "$WINDOW_UNLIMITED" = "true" ]; } \
+           && { [ -z "$SEASON_TO_SEARCH" ] || [ "$SEASON_TO_SEARCH" = "$sn" ]; }; then
           log "                  single episodes exhausted -> allowing a season pack"
           NEED_SEASON_SEARCH=1
           SEASON_TO_SEARCH=$sn
@@ -1072,16 +1089,22 @@ while IFS= read -r srow; do
                fi ;;
           esac
         elif [ "$SEARCH_MISSING" = "true" ] && [ "$WINDOW_UNLIMITED" = "true" ] && [ "$stype" != "anime" ] \
-             && { [ -z "$SEASON_TO_SEARCH" ] || [ "$SEASON_TO_SEARCH" = "$sn" ]; } \
-             && ! printf '%s\n' "$ORDERED" | awk -F'|' -v s="$sn" '$2==s && $5=="true"{f=1} END{exit !f}' \
-             && search_due "season-${sid}-${sn}"; then
+             && season_fresh "$sn" && search_due "season-${sid}-${sn}"; then
           # WHOLE SEASON MISSING (a fresh request), standard show: one SeasonSearch
           # instead of N EpisodeSearches. Episode searches cannot take a season
           # pack, and a lone single they grab blocks the pack (After Life S3,
           # 2026-11-10: only E4 existed as a single; the pack sat rejected).
-          NEED_SEASON_SEARCH=1
-          SEASON_TO_SEARCH=$sn
-          SEASON_EIDS="$SEASON_EIDS $eid"
+          # Fresh = no file, nothing watched, NOTHING QUEUED: a stalled single
+          # would make the season search skip forever with no attempt counted.
+          # One season search per run; a second fresh season waits for the next
+          # run instead of falling back to episode searches (review 2026-11-11).
+          if [ -z "$SEASON_TO_SEARCH" ] || [ "$SEASON_TO_SEARCH" = "$sn" ]; then
+            NEED_SEASON_SEARCH=1
+            SEASON_TO_SEARCH=$sn
+            SEASON_EIDS="$SEASON_EIDS $eid"
+          else
+            log "    DEFERRED       S${sn}E${en}  (whole season missing; gets its own season search next run)"
+          fi
         else
           queue_episode_search "$eid" "S${sn}E${en}"
         fi
