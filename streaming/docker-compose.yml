@@ -268,9 +268,22 @@ services:
     container_name: warp
     mem_limit: 384m
     # 2026-11-10: no swap. warp-svc leaks; with Docker's default 2x swap it sat at its
-    # cap swapping (~700 MB anon+swap, the VM's main swap traffic) instead of being
-    # OOM-killed and restarted (restart: always) in seconds. Baseline ~150 MiB.
+    # cap swapping (~700 MB anon+swap, the VM's main swap traffic). Baseline ~150 MiB.
     memswap_limit: 384m
+    # An OOM kill hits warp-svc (largest process), NOT the container's PID 1, so the
+    # container stayed up with gost proxying over the plain ISP route and restart:
+    # always never fired (review 2026-11-11). This wrapper exits the container when
+    # warp-svc or the image's entrypoint is gone, so Docker restarts it in seconds.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >-
+        trap 'kill $$CHILD 2>/dev/null; exit 0' TERM INT;
+        /entrypoint.sh & CHILD=$$!;
+        sleep 60;
+        while pgrep -x warp-svc >/dev/null && kill -0 $$CHILD 2>/dev/null; do sleep 10 & wait $$!; done;
+        echo 'warp-svc gone (OOM?) - exiting so restart: always brings warp back';
+        exit 1
     device_cgroup_rules:
       - 'c 10:200 rwm'
     environment:
