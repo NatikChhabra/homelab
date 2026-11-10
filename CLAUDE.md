@@ -236,11 +236,26 @@ gitignored path, force-add it in the same breath.
   (~2 min). Family DNS survives it: the router hands out 94.140.14.14 (AdGuard public DNS,
   ad-blocking, verified 2026-11-03) as the second server. The Airtel router has no SSH/telnet
   (only its web UI), so AdGuard Home cannot run on it. Untried option: force the USB mass-storage (BOT) driver instead of UAS.
-- **Crashes:** one blue screen in 120 days (0xA, 2026-11-02 11:01 IST, minidump
-  C:\Windows\Minidump\110226-13390-01.dmp): `!analyze` names only nt!RtlpxVirtualUnwind in
-  svchost, no third-party driver. Every other unexpected restart has bugcheck 0 (power/sleep).
-  WinDbg is installed (winget Microsoft.WinDbg; kd.exe under its WindowsApps folder\amd64). If a
-  second bugcheck appears, compare the two and run Windows Memory Diagnostic.
+- **Crashes:** three bugchecks: 0x50 (2026-07-05), 0xA (2026-11-02 11:01 IST, minidump
+  C:\Windows\Minidump\110226-13390-01.dmp; `!analyze` names only nt!RtlpxVirtualUnwind in
+  svchost) and 0x133 DPC_WATCHDOG_VIOLATION (2026-11-03 19:38 IST, 110326-11109-01.dmp; came
+  after host commit exhaustion: Ntfs 50 delayed-write failures and SCM 'insufficient resources'
+  in the 25 min before). Plus a silent hang 2026-11-05 ~01:11-03:03 IST (Kernel-Power 41,
+  bugcheck 0). Memory starvation is the common thread; faulty RAM is not ruled out. STILL TO DO
+  in a maintenance window (owner's call, needs a reboot): Windows Memory Diagnostic (Extended),
+  and `!analyze -v` on both dumps ON ANOTHER PC (kd on this host hung during the 11-10 outage).
+  WinDbg is installed (winget Microsoft.WinDbg; kd.exe under its WindowsApps folder\amd64).
+- **Docker engine hang (2026-11-10 23:56 IST, ~55 min):** API returned 500/503, VM stopped,
+  every container and AdGuard down (family DNS fell back to 94.140.14.14). Swap had been ~83%
+  used (warp leaking against its cap). Stopping only 'Docker Desktop' did NOT recover it
+  ("Docker Desktop is unable to start"); killing com.docker.backend too + `wsl --shutdown` +
+  relaunch did. mount-watchdog.ps1 now does exactly that after 4 consecutive engine-down checks
+  (~12 min, uptime >= 15 min, max once per 30 min; state in logs/engine-down.json). warp and
+  glances got memswap caps the same night.
+- **Docker Desktop runs in Session 0** whenever the watchdog (S4U task) relaunched it; it has
+  worked that way since 2026-11-06. ICS (SharedAccess) also holds UDP 0.0.0.0:53 next to
+  Docker; AdGuard still answers on 192.168.1.107:53 (verified after the 11-10 restart). Leave
+  ICS alone.
 - `mount-watchdog.log` lines before `2026-11-03T09:15:32Z` are **local time (IST) wrongly
   marked Z**; from that line on they are true UTC. Subtract 5:30 from the old ones.
 
