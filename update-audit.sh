@@ -136,6 +136,15 @@ classify_bump() {
   printf 'UNKNOWN'
 }
 
+# ---- running containers (checked BEFORE the staged file is rewritten) -----
+# 2026-11-10: with the daemon down, docker ps returned nothing, the loop audited
+# nothing, the job said all clear and exited 0, and the previous day's staged
+# file had already been truncated. Fail instead, leaving it untouched.
+CONTAINERS=$(docker ps --format '{{.Names}}') && [ -n "$CONTAINERS" ] || {
+  log "ERROR docker ps failed or returned no containers - nothing audited, staged file left untouched"
+  exit 1
+}
+
 # ---- staged apply script ---------------------------------------------------
 {
   echo "#!/bin/bash"
@@ -151,7 +160,6 @@ classify_bump() {
 STAGED_ANY=false
 
 # ---- walk running containers ----------------------------------------------
-CONTAINERS=$(docker ps --format '{{.Names}}')
 
 for cname in $CONTAINERS; do
   INFO=$(docker inspect "$cname" --format '{{.Config.Image}}|{{.Image}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.service"}}' 2>/dev/null)
