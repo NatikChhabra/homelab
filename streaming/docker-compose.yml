@@ -267,6 +267,10 @@ services:
     image: caomingjun/warp:latest
     container_name: warp
     mem_limit: 384m
+    # 2026-11-10: no swap. warp-svc leaks; with Docker's default 2x swap it sat at its
+    # cap swapping (~700 MB anon+swap, the VM's main swap traffic) instead of being
+    # OOM-killed and restarted (restart: always) in seconds. Baseline ~150 MiB.
+    memswap_limit: 384m
     device_cgroup_rules:
       - 'c 10:200 rwm'
     environment:
