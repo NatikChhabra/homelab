@@ -106,8 +106,15 @@ if ($Mode -eq 'Server') {
     # Octo + yt-dlp-shim + slskd idle at ~1.1 GB and ~0% CPU. restart=no keeps the
     # stopped ones down across reboots until Server mode puts it back.
     $keep = ' (navidrome|octo|yt-dlp-shim|slskd)$'
+    # 2026-11-10: wait for the engine like the Server branch does, and check the
+    # result. This used to run once and report success even when Docker was not
+    # answering, leaving every container at restart=always.
+    for ($i = 0; $i -lt 60 -and -not (docker version -f '{{.Server.Version}}' 2>$null); $i++) { Start-Sleep 5 }
     $others = docker ps -a --format '{{.ID}} {{.Names}}' | ? { $_ -notmatch $keep } | % { ($_ -split ' ')[0] }
     if ($others) { docker update --restart=no $others | Out-Null; docker stop $others | Out-Null }
+    $still = docker ps --format '{{.Names}}' | ? { " $_" -notmatch $keep }
+    if (-not (docker version -f '{{.Server.Version}}' 2>$null)) { Log 'WARN docker not answering - server containers NOT stopped'; $note = ' Docker did not answer: the server apps may still be running.' }
+    elseif ($still) { Log "WARN still running: $($still -join ', ')"; $note = " $(@($still).Count) server app(s) did not stop." }
     powercfg /setactive $BAL
     powercfg /change standby-timeout-ac 30; powercfg /change standby-timeout-dc 10
     powercfg /change monitor-timeout-ac 10; powercfg /change monitor-timeout-dc 3
