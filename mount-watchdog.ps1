@@ -120,7 +120,7 @@ function Log($msg) {
 
 # Keep the log bounded.
 if ((Test-Path $LogFile) -and ((Get-Item $LogFile).Length -gt 1MB)) {
-    Move-Item $LogFile "$LogFile.1" -Force
+    try { Move-Item $LogFile "$LogFile.1" -Force } catch {}   # held? next run retries
 }
 
 function Test-DataMount {
@@ -129,6 +129,9 @@ function Test-DataMount {
     try {
         # df -kP prints the same columns in GNU (sonarr) and BusyBox (navidrome); BusyBox ignores the G in -BG.
         $out = Invoke-DockerT @('exec', $Probe, 'sh', '-c', "df -kP $MountPath 2>/dev/null | tail -1")
+        # $null = timed out (slow engine), not a dead mount: route it to the
+        # strike-counted branch below instead of an instant restart (review 2026-11-11).
+        if ($null -eq $out) { $script:ProbeTimedOut = $true; return $false }
         if (-not $out) { return $false }
         if ($out -match 'No such device') { return $false }
         $kb = ($out -split '\s+') | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1
@@ -136,11 +139,26 @@ function Test-DataMount {
         $gb = [int]([int64]$kb / 1048576)
         if ($gb -lt $MinSizeGB) { return $false }
         $ls = Invoke-DockerT @('exec', $Probe, 'sh', '-c', "ls $MountPath 2>/dev/null")
+        if ($null -eq $ls) { $script:ProbeTimedOut = $true; return $false }
         return [bool]($ls -match $Expect)
     } catch { return $false }
 }
 
 $EngineDownFile = 'C:\ServerData\Stacks\logs\engine-down.json'
+$script:ProbeTimedOut = $false
+
+# Healthy: reset the strike count, but keep a restart from the last 30 min so a
+# flapping engine cannot be force-restarted every ~15 min (review 2026-11-11).
+function Clear-EngineDown {
+    try {
+        $j = Get-Content $EngineDownFile -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($j.lastRestartUtc -and ((Get-Date).ToUniversalTime() - ([datetime]$j.lastRestartUtc).ToUniversalTime()).TotalMinutes -lt 30) {
+            if ([int]$j.count -ne 0) { @{ count = 0; firstUtc = $null; lastRestartUtc = $j.lastRestartUtc } | ConvertTo-Json | Set-Content $EngineDownFile }
+            return
+        }
+    } catch {}
+    Remove-Item $EngineDownFile -ErrorAction SilentlyContinue
+}
 
 # Full Docker Desktop restart. Stopping only 'Docker Desktop' was NOT enough on
 # 2026-11-10 ("Docker Desktop is unable to start", VM stopped): killing the
@@ -162,7 +180,7 @@ function Restart-DockerFull {
 }
 
 if (Test-DataMount) {
-    Remove-Item $EngineDownFile -ErrorAction SilentlyContinue
+    Clear-EngineDown
     Log 'OK  /data mount healthy'
     # Job freshness (added 2026-11-01). Kuma 1.23 restarts every push monitor's
     # timer when it starts, and Docker restarts often here, so a nightly job
@@ -197,22 +215,28 @@ if (Test-DataMount) {
 # The server version is empty until the engine answers ('docker info' prints client text even when it is
 # down, and under ErrorActionPreference=Stop its stderr killed this script at every boot).
 $engine = Invoke-DockerT @('version', '-f', '{{.Server.Version}}') 20
-if (-not $engine) {
+if (-not $engine -or $script:ProbeTimedOut) {
     # HUNG-ENGINE ESCALATION (2026-11-10). This branch used to SKIP forever: on
     # 2026-11-10 the engine hung at 23:56 IST and nothing recovered it (AdGuard,
-    # every app and Kuma itself were down ~55 min); on 2026-11-03 the same SKIP
-    # ran 67 min. Its 'down' heartbeat can never arrive, because Kuma runs in the
+    # every app and Kuma itself were down ~55 min). Its 'down' heartbeat can never arrive, because Kuma runs in the
     # same engine. So: count consecutive cycles; after 4 (~12 min, longer than
-    # any normal Docker start) and once Windows has been up 15+ min (a boot is
-    # not a hang), do a full restart. At most one restart per 30 min.
+    # any normal Docker start) and once Docker has been running 15+ min, do a
+    # full restart. At most one restart per 30 min.
     $st = @{ count = 0; firstUtc = (Get-Date).ToUniversalTime().ToString('o'); lastRestartUtc = $null }
     if (Test-Path $EngineDownFile) {
-        try { $j = Get-Content $EngineDownFile -Raw | ConvertFrom-Json; $st.count = [int]$j.count; $st.firstUtc = $j.firstUtc; $st.lastRestartUtc = $j.lastRestartUtc } catch {}
+        try { $j = Get-Content $EngineDownFile -Raw | ConvertFrom-Json; $st.count = [int]$j.count; if ($j.firstUtc) { $st.firstUtc = $j.firstUtc }; $st.lastRestartUtc = $j.lastRestartUtc } catch {}
     }
     $st.count++
-    $upMin = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalMinutes
+    # Gate on how long Docker itself has been running, NOT on OS uptime (review
+    # 2026-11-11): auto-logon is off and Docker Desktop starts only at an
+    # interactive logon, so after a reboot with nobody logged in there is no
+    # Docker process at all. That is 'not started', never 'hung' -- the 67-min
+    # SKIP on 2026-11-03 was exactly that (logon at 20:47 IST). A fresh start
+    # under 15 min old is also left alone.
+    $dd = Get-Process 'com.docker.backend', 'Docker Desktop' -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1
+    $ddMin = if ($dd) { ((Get-Date) - $dd.StartTime).TotalMinutes } else { 0 }
     $sinceRestart = if ($st.lastRestartUtc) { ((Get-Date).ToUniversalTime() - ([datetime]$st.lastRestartUtc).ToUniversalTime()).TotalMinutes } else { 9999 }
-    if ($st.count -ge 4 -and $upMin -ge 15 -and $sinceRestart -ge 30) {
+    if ($st.count -ge 4 -and $ddMin -ge 15 -and $sinceRestart -ge 30) {
         Log ("ENGINE HUNG  not answering for {0} consecutive checks since {1} - full Docker Desktop restart" -f $st.count, $st.firstUtc)
         $st.lastRestartUtc = (Get-Date).ToUniversalTime().ToString('o')
         $st | ConvertTo-Json | Set-Content $EngineDownFile
@@ -232,11 +256,12 @@ if (-not $engine) {
         exit 1
     }
     $st | ConvertTo-Json | Set-Content $EngineDownFile
-    Log ("SKIP  docker engine not answering ({0} in a row; full restart at 4) - mount not checked" -f $st.count)
+    $why = if ($script:ProbeTimedOut) { 'mount probe timed out (engine slow)' } else { 'docker engine not answering' }
+    Log ("SKIP  {0} ({1} in a row; full restart at 4 once Docker is 15+ min old) - mount not checked" -f $why, $st.count)
     Send-Heartbeat -State 'down' -Message 'docker engine not answering - mount not checked'
     exit 0
 }
-Remove-Item $EngineDownFile -ErrorAction SilentlyContinue
+Clear-EngineDown
 $probeRunning = Invoke-DockerT @('inspect', '-f', '{{.State.Running}}', $Probe) 15
 if ($probeRunning -ne 'true') {
     Log ("SKIP  probe container {0} not running - mount not checked, Docker not restarted" -f $Probe)
@@ -260,7 +285,19 @@ if (-not (Test-Path $HostPath)) {
 
 Log 'host drive is healthy - the Docker VM mount died. Restarting Docker Desktop.'
 try {
-    $null = Restart-DockerFull
+    # The engine ANSWERS here, so first the gentle restart that repaired ~20 USB
+    # drops: only the Docker Desktop front end. The full restart (backend kill +
+    # wsl --shutdown = pulling power on every container mid-write) only if the
+    # engine does not come back from that (review 2026-11-11).
+    Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 25
+    Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+    $back = $false; $deadline = (Get-Date).AddMinutes(8)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 20
+        if (Invoke-DockerT @('version', '-f', '{{.Server.Version}}') 15) { $back = $true; break }
+    }
+    if (-not $back) { Log 'engine did not return from the gentle restart - full restart'; $null = Restart-DockerFull }
 } catch {
     Log ('ERROR  could not restart Docker Desktop: {0}' -f $_.Exception.Message)
 }
