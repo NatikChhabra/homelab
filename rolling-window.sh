@@ -372,7 +372,7 @@ LEDGER="${RW_LEDGER:-/c/ServerData/Stacks/watched-ledger.txt}"
 [ -f "$LEDGER" ] || : > "$LEDGER"
 
 ledger_has() {  # $1=sonarrSeriesId $2=season $3=episode
-  grep -Fq "$1|$2|$3|" "$LEDGER" 2>/dev/null
+  grep -q "^$1|$2|$3|" "$LEDGER" 2>/dev/null   # anchored 2026-11-10: "1|1|1|" also matched series 11
 }
 ledger_add() {  # $1=sonarrSeriesId $2=season $3=episode
   ledger_has "$1" "$2" "$3" && return 0
@@ -433,6 +433,10 @@ while IFS='|' read -r uqid utitle; do
   if [ "$code" = "200" ] || [ "$code" = "204" ]; then
     log "CLEARED       unimportable $utitle (queueId=$uqid, not an upgrade; torrent left seeding, release blocklisted)"
     TOTAL_UNIMPORTABLE=$((TOTAL_UNIMPORTABLE+1))
+  elif [ "$code" = "404" ]; then
+    # A season pack has one queue row per episode; clearing the first row
+    # removes the whole download, so the rest 404. Not a failure (2026-11-10).
+    log "CLEARED       $utitle (queueId=$uqid already gone with its season pack)"
   else
     log "CLEAR FAILED  queueId=$uqid ($utitle) http=$code"
     EXIT_CODE=1
@@ -817,6 +821,8 @@ while IFS= read -r srow; do
   # dormant episodes, the next run sees them unmonitored and cancels the pack.
   NEED_SEASON_SEARCH=0
   SEASON_TO_SEARCH=""
+  SEASON_EIDS=""       # episodes whose search is the season search (attempts counted on fire)
+  DUB_TRIED=""         # seasons whose dub-pack grab already ran this run
   PROTECTED_DLIDS=""
   while IFS='|' read -r eid sn en emon ehas efid; do
     [ -z "${eid:-}" ] && continue
@@ -1013,8 +1019,11 @@ while IFS= read -r srow; do
         # now fall back to a season pack (which an EpisodeSearch always rejects).
         # This is what keeps packs LAST: singles get STUCK_THRESHOLD attempts
         # first, and among singles the profile score puts dub above sub.
-        if [ "$ANIME_SEASON_SEARCH" = "true" ] && [ "$stype" = "anime" ]; then
-          log "                  anime: single episodes exhausted -> allowing a season pack"
+        # 2026-11-10: standard shows too when the window is unlimited (the whole
+        # season is wanted anyway). After Life S3 exists almost only as a pack.
+        if [ "$ANIME_SEASON_SEARCH" = "true" ] && [ "$SEARCH_MISSING" = "true" ] \
+           && { [ "$stype" = "anime" ] || [ "$WINDOW_UNLIMITED" = "true" ]; }; then
+          log "                  single episodes exhausted -> allowing a season pack"
           NEED_SEASON_SEARCH=1
           SEASON_TO_SEARCH=$sn
         fi
@@ -1047,13 +1056,32 @@ while IFS= read -r srow; do
       # the one before it found nothing, and all of them share one cooldown key,
       # so a season is never hammered more than once per SEARCH_COOLDOWN_HOURS.
       if [ "$ehas" != "true" ]; then
-        if [ "$ANIME_SEASON_SEARCH" = "true" ] && [ "$stype" = "anime" ] && search_due "season-${sid}-${sn}"; then
-          if [ "$DUB_GRAB" = "true" ] && dub_pack_grab "$sid" "$stitle" "$sn"; then
-            search_mark "season-${sid}-${sn}"
-          else
-            NEED_SEASON_SEARCH=1
-            SEASON_TO_SEARCH=$sn
-          fi
+        # SEARCH_MISSING gate added 2026-11-10: the disk floor stopped only the
+        # EpisodeSearch path; the dub grab and SeasonSearch ignored it.
+        if [ "$SEARCH_MISSING" = "true" ] && [ "$ANIME_SEASON_SEARCH" = "true" ] && [ "$stype" = "anime" ] && search_due "season-${sid}-${sn}"; then
+          # Once per season per run: this used to run a full Prowlarr search for
+          # EVERY missing episode of the season (2026-11-10 review).
+          case " $DUB_TRIED " in
+            *" $sn "*) ;;
+            *) DUB_TRIED="$DUB_TRIED $sn"
+               if [ "$DUB_GRAB" = "true" ] && dub_pack_grab "$sid" "$stitle" "$sn"; then
+                 search_mark "season-${sid}-${sn}"
+               else
+                 NEED_SEASON_SEARCH=1
+                 SEASON_TO_SEARCH=$sn
+               fi ;;
+          esac
+        elif [ "$SEARCH_MISSING" = "true" ] && [ "$WINDOW_UNLIMITED" = "true" ] && [ "$stype" != "anime" ] \
+             && { [ -z "$SEASON_TO_SEARCH" ] || [ "$SEASON_TO_SEARCH" = "$sn" ]; } \
+             && ! printf '%s\n' "$ORDERED" | awk -F'|' -v s="$sn" '$2==s && $5=="true"{f=1} END{exit !f}' \
+             && search_due "season-${sid}-${sn}"; then
+          # WHOLE SEASON MISSING (a fresh request), standard show: one SeasonSearch
+          # instead of N EpisodeSearches. Episode searches cannot take a season
+          # pack, and a lone single they grab blocks the pack (After Life S3,
+          # 2026-11-10: only E4 existed as a single; the pack sat rejected).
+          NEED_SEASON_SEARCH=1
+          SEASON_TO_SEARCH=$sn
+          SEASON_EIDS="$SEASON_EIDS $eid"
         else
           queue_episode_search "$eid" "S${sn}E${en}"
         fi
@@ -1091,12 +1119,15 @@ while IFS= read -r srow; do
     elif ! search_due "$_skey"; then
       log "  season search on cooldown for S${SEASON_TO_SEARCH} (last attempt < ${SEARCH_COOLDOWN_HOURS}h ago)"
     elif [ "$DRY_RUN" = "true" ]; then
-      log "  WOULD SEASON SEARCH  anime S${SEASON_TO_SEARCH} (dub packs are rejected by an episode search)"
+      log "  WOULD SEASON SEARCH  S${SEASON_TO_SEARCH} (season packs are rejected by an episode search)"
     else
       _code=$(sonarr_post "/api/v3/command" "{\"name\":\"SeasonSearch\",\"seriesId\":$sid,\"seasonNumber\":$SEASON_TO_SEARCH}")
       if [ "$_code" = "201" ] || [ "$_code" = "200" ]; then
-        log "  SEASON SEARCH   anime S${SEASON_TO_SEARCH} triggered (http=$_code) - packs allowed, dub preferred by profile score"
+        log "  SEASON SEARCH   S${SEASON_TO_SEARCH} triggered (http=$_code) - packs and singles allowed, dub preferred by profile score"
         search_mark "$_skey"
+        # Count it as an attempt for each episode it stood in for, so STUCK
+        # detection still advances for a season nobody has released.
+        for _e in $SEASON_EIDS; do search_mark "$_e"; done
       else
         log "  SEASON SEARCH FAILED  S${SEASON_TO_SEARCH} (http=$_code)"
         EXIT_CODE=1
