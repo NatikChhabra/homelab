@@ -100,8 +100,15 @@ esac
 
 # ---- Build the exclusion set: every torrent qBittorrent knows about ---------
 EXCLUDE=$(mktemp)
-sq "curl -s -m 60 -H 'Cookie: $QB_SID' '$QB_URL/api/v2/torrents/info'" \
-  | jqc -r '.[] | .content_path // empty' 2>/dev/null > "$EXCLUDE"
+# 2026-11-10: this fetch was unchecked. A 403/5xx body, a timeout, truncated
+# JSON or a failed docker exec all gave an EMPTY list, which this script read as
+# "no torrents" -- and then deleted every unprotected file. curl -f turns HTTP
+# errors into a non-zero exit; jq errors on anything that is not an array. (Not
+# jq -e: it exits 4 on a genuinely empty torrent list.)
+RAW=$(sq "curl -sf -m 60 -H 'Cookie: $QB_SID' '$QB_URL/api/v2/torrents/info'") \
+  && printf '%s' "$RAW" | jqc -r 'if type=="array" then .[] | .content_path // empty else error("not an array") end' > "$EXCLUDE" \
+  || { log "FATAL  could not read qBittorrent's torrent list - the exclusion set would be empty. Nothing was touched."
+       rm -f "$EXCLUDE"; exit 2; }
 
 TORRENT_COUNT=$(wc -l < "$EXCLUDE" | tr -d ' ')
 log "Torrents known to qBittorrent: $TORRENT_COUNT (all states) - their files are off limits"
@@ -123,7 +130,7 @@ while IFS= read -r t; do [ -n "$t" ] && log "  protected: $t"; done < "$EXCLUDE_
 
 is_protected() {  # $1 = path relative to HOST_ROOT
   local top="${1%%/*}"
-  grep -Fxq "$top" "$EXCLUDE_HOST" 2>/dev/null
+  grep -Fxq -- "$top" "$EXCLUDE_HOST" 2>/dev/null
 }
 
 # ---- Find candidates: guard 1 (nlink==1) + guard 2 (not protected) ---------
