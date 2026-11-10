@@ -144,7 +144,11 @@ sec "5. Hardlink efficiency"
 # shows up as slow, invisible disk bloat.
 dup=$(docker exec sonarr sh -c '
   n=0; b=0
-  for f in $(find /data/library -type f \( -name "*.mkv" -o -name "*.mp4" \) 2>/dev/null); do
+  # while-read, not for-in-$(find): every library path has spaces, so the old
+  # loop split them into fragments that stat could not read -- no file was ever
+  # actually examined and this check could only say OK (fixed 2026-11-10).
+  find /data/library -type f \( -name "*.mkv" -o -name "*.mp4" \) 2>/dev/null > /tmp/hl_list
+  while IFS= read -r f; do
     l=$(stat -c %h "$f" 2>/dev/null)
     if [ "${l:-1}" -eq 1 ]; then
       sz=$(stat -c %s "$f" 2>/dev/null)
@@ -152,7 +156,8 @@ dup=$(docker exec sonarr sh -c '
         n=$((n+1)); b=$((b+sz))
       fi
     fi
-  done
+  done < /tmp/hl_list
+  rm -f /tmp/hl_list
   echo "$n $b"' 2>/dev/null)
 dn=$(printf '%s' "$dup" | awk '{print $1+0}')
 db=$(printf '%s' "$dup" | awk '{print int($2/1073741824)}')
@@ -346,6 +351,21 @@ if printf '%s' "$SER" | grep -q '"id"'; then
         | length')
     if [ "${stray:-0}" -gt 0 ]; then
       fail "$title: $stray episode(s) monitored OUTSIDE the requested season(s) [$reqs] - wrong season being fetched"
+    fi
+    # OTHER DIRECTION (2026-11-10, After Life S3): an aired episode of a
+    # requested season that is unmonitored, has no file and was never watched
+    # will never download. Watched episodes are unmonitored and deleted on
+    # purpose by rolling-window.sh, so the watch ledger is excluded. FAIL, not
+    # WARN: the weekly run never alerts on WARN.
+    gaps=$(printf '%s' "$eps" | jqs -r --arg r "$reqs" --arg now "$(date -u +%FT%TZ)" '
+        ($r | split(",") | map(select(. != "") | tonumber)) as $req
+        | .[] | select(.monitored==false and .hasFile==false and .seasonNumber>0
+                       and (.airDateUtc // "9") < $now
+                       and (.seasonNumber as $s | ($req | index($s)) != null))
+        | "\(.seriesId)|\(.seasonNumber)|\(.episodeNumber)|"' \
+      | grep -vf <(cut -d'|' -f1-3 /c/ServerData/Stacks/watched-ledger.txt 2>/dev/null | grep . | sed 's/^/^/; s/$/|/') | grep -c .)
+    if [ "${gaps:-0}" -gt 0 ]; then
+      fail "$title: $gaps aired episode(s) in requested season(s) [$reqs] are unmonitored with no file and not watched - they will never download"
     fi
 
     # Counted regardless of the queue. An episode with a STALLED download is
@@ -784,7 +804,10 @@ sec "17. DNS filtering actually resolves"
 # resolves a real name through it rather than trusting container state.
 if docker inspect -f '{{.State.Status}}' adguardhome >/dev/null 2>&1; then
   dnsres=$(nslookup -timeout=5 example.com 127.0.0.1 2>&1)
-  if printf '%s' "$dnsres" | grep -qiE '^Address(es)?:[[:space:]]*[0-9]' ; then
+  # Only Address lines AFTER 'Name:' are answers. nslookup always prints the
+  # server's own 'Address: 127.0.0.1' header first, so the old grep matched it
+  # and this check passed even with AdGuard dead (found 2026-11-10).
+  if printf '%s' "$dnsres" | tr -d '\r' | awk '/^Name:/{f=1} f && /^Address(es)?:[[:space:]]*[0-9]/{ok=1} END{exit !ok}' ; then
     ok "AdGuard answers DNS on 127.0.0.1:53"
   else
     fail "AdGuard is running but port 53 did not resolve example.com -- devices pointed at it will lose all DNS"
@@ -1160,6 +1183,9 @@ if [ -n "$_vmstat" ]; then
   else
     ok "WSL VM swap is ${_swappct}% free"
   fi
+else
+  # Used to vanish silently from the report (2026-11-10).
+  warn "could not read WSL VM memory (docker run valkey/valkey:9 failed) - memory pressure NOT checked"
 fi
 
 # ---------------------------------------------------------------------------
