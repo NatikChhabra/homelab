@@ -19,6 +19,11 @@ import hashlib, json, os, re, secrets, shutil, sys, time, unicodedata, urllib.pa
 MUSIC = r'D:\Media\music'
 TRASH = os.path.join(MUSIC, '.octo-trash', 'dupe-guard', time.strftime('%Y-%m-%d'))
 HISTORY = r'C:\ServerData\Octo\config\downloads-history.json'
+# Surnames shared by many different artists: a match on one of these alone is not
+# the same artist ('Arijit Singh' vs 'Jasleen Singh', 2026-11-10).
+COMMON = {'singh', 'kumar', 'khan', 'sharma', 'kapoor', 'shah', 'das', 'roy', 'ali', 'patel', 'gill',
+          'sandhu', 'dhillon', 'sidhu', 'grewal', 'malik', 'mehta', 'verma', 'gupta', 'chauhan', 'rao',
+          'smith', 'jones', 'brown', 'johnson', 'williams', 'lee', 'kim', 'park', 'nguyen', 'garcia'}
 JUNK = {'from', 'smart', 'shuffle', 'official', 'youtube', 'channel', 'music', 'topic', 'vevo',
         'records', 'and', 'feat', 'ft', 'with', 'the', 'x'}
 U, P = os.environ.get('NAVIDROME_USER', ''), os.environ.get('NAVIDROME_PASS', '')
@@ -26,7 +31,9 @@ U, P = os.environ.get('NAVIDROME_USER', ''), os.environ.get('NAVIDROME_PASS', ''
 
 def norm_title(t):
     t = unicodedata.normalize('NFKC', t).lower()
-    t = re.sub(r'\((feat|ft|with)\.?[^)]*\)', '', t)
+    # \b: without it '(Without Vocals)' matched as '(with ...)' and an instrumental
+    # became a 'duplicate' of the vocal song (2026-11-10).
+    t = re.sub(r'\((feat|ft|with)\b\.?[^)]*\)', '', t)
     return re.sub(r'[\W_]+', '', t)
 
 
@@ -39,7 +46,10 @@ def same_song(new, old):
     """new/old: dicts with title, artist, duration (seconds or None)."""
     if norm_title(new['title']) != norm_title(old['title']):
         return False
-    if not artist_words(new['artist']) & artist_words(old['artist']):
+    na, oa = artist_words(new['artist']), artist_words(old['artist'])
+    shared = na & oa
+    # A shared word counts unless it is only a common surname and the names differ otherwise.
+    if not shared or (shared <= COMMON and not (na <= oa or oa <= na)):
         return False
     a, b = new.get('duration'), old.get('duration')
     return not (a and b) or abs(a - b) <= 6
@@ -58,6 +68,14 @@ def demo():
                          {'title': 'Raabta', 'artist': 'Pritam, Arijit Singh', 'duration': 240})
     assert not same_song({'title': 'Lover', 'artist': 'Taylor Swift', 'duration': 300},
                          {'title': 'Lover', 'artist': 'Taylor Swift', 'duration': 221})
+    assert not same_song({'title': 'Raabta (Without Vocals)', 'artist': 'Pritam', 'duration': 240},
+                         {'title': 'Raabta', 'artist': 'Pritam', 'duration': 241})
+    assert same_song({'title': 'Stay (with Justin Bieber)', 'artist': 'The Kid LAROI', 'duration': 141},
+                     {'title': 'Stay', 'artist': 'The Kid LAROI, Justin Bieber', 'duration': 141})
+    assert not same_song({'title': 'Tum Hi Ho', 'artist': 'Jasleen Singh', 'duration': 262},
+                         {'title': 'Tum Hi Ho', 'artist': 'Arijit Singh', 'duration': 262})
+    assert same_song({'title': 'Tum Hi Ho', 'artist': 'Arijit Singh Official', 'duration': 262},
+                     {'title': 'Tum Hi Ho', 'artist': 'Arijit Singh', 'duration': 262})
     print('demo ok')
 
 
