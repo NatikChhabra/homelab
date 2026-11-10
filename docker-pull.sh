@@ -77,6 +77,14 @@ if printf '%s' "$out" | grep -q '"error"'; then
   exit 1
 fi
 
+# A pull that never ran (helper failed to start, empty stream) has no error key
+# either, and the image check below then passed on the OLD local image
+# (2026-11-10). The stream must end with Docker's own final status line.
+if ! printf '%s' "$out" | grep -qE 'Status: (Downloaded newer image|Image is up to date)'; then
+  printf 'PULL FAILED: no completion status from the daemon\n' >&2
+  exit 1
+fi
+
 if docker image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
   printf 'OK: %s:%s is present locally\n' "$IMAGE" "$TAG"
   exit 0
