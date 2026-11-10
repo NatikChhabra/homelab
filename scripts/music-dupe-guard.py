@@ -33,7 +33,7 @@ def norm_title(t):
     t = unicodedata.normalize('NFKC', t).lower()
     # \b: without it '(Without Vocals)' matched as '(with ...)' and an instrumental
     # became a 'duplicate' of the vocal song (2026-11-10).
-    t = re.sub(r'\((feat|ft|with)\b\.?[^)]*\)', '', t)
+    t = re.sub(r'\((feat(uring)?|ft|with)\b\.?[^)]*\)', '', t)
     return re.sub(r'[\W_]+', '', t)
 
 
@@ -76,6 +76,10 @@ def demo():
                          {'title': 'Tum Hi Ho', 'artist': 'Arijit Singh', 'duration': 262})
     assert same_song({'title': 'Tum Hi Ho', 'artist': 'Arijit Singh Official', 'duration': 262},
                      {'title': 'Tum Hi Ho', 'artist': 'Arijit Singh', 'duration': 262})
+    assert same_song({'title': 'Bad Habits (Featuring X)', 'artist': 'Ed Sheeran', 'duration': 200},
+                     {'title': 'Bad Habits', 'artist': 'Ed Sheeran', 'duration': 200})
+    assert same_song({'title': 'Bad Habits (feat. X)', 'artist': 'Ed Sheeran', 'duration': 200},
+                     {'title': 'Bad Habits', 'artist': 'Ed Sheeran', 'duration': 200})
     print('demo ok')
 
 
