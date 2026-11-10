@@ -52,6 +52,11 @@ log "=== shrink-library START (max $MAX_FILES files, cq $CQ, dry=$DRY)"
 watching=$(docker exec jellyfin sh -c "curl -s -m 10 -H '$JF' http://localhost:8096/Sessions" 2>/dev/null | grep -c '"NowPlayingItem"')
 if [ "${watching:-0}" -gt 0 ]; then log "someone is watching ($watching session(s)) - skipping tonight"; exit 0; fi
 
+# Partial temp files from an encode that was killed (reboot, USB drop) are never
+# re-encoded or cleaned, because the scan below skips *.shrinking.*. Only one run
+# exists at a time, so any left now are dead (2026-11-10 review).
+[ "$DRY" != 1 ] && docker exec jellyfin sh -c 'find /data/library -type f -name "*.shrinking.*" -print -delete' 2>/dev/null \
+  | while IFS= read -r t; do log "removed leftover partial encode: $t"; done
 done_n=0; saved=0
 while IFS= read -r f; do
   [ "$done_n" -ge "$MAX_FILES" ] && break
@@ -79,7 +84,7 @@ while IFS= read -r f; do
     s1=$(stat -c %s "$f"); s2=$(stat -c %s "$tmp")
     ok=$(awk -v a="$d1" -v b="$d2" -v x="$s1" -v y="$s2" "BEGIN{print ((a-b<2 && b-a<2) && y < x*0.9) ? 1 : 0}")
     rm -f "${f%.*}.shrinking.nfo"   # Jellyfin writes metadata for the temp file while it exists
-    if [ "$ok" = 1 ]; then mv -f "$tmp" "$f"; chown "$own" "$f"; echo "OK $s1 $s2"; else rm -f "$tmp"; echo "KEPT original (dur $d1 vs $d2, size $s1 vs $s2)"; fi' _ "$f" "$CQ" "$ENCODE_TIMEOUT")
+    if [ "$ok" = 1 ]; then if mv -f "$tmp" "$f"; then chown "$own" "$f"; echo "OK $s1 $s2"; else rm -f "$tmp"; echo "FAIL replace (mv failed, original kept)"; fi; else rm -f "$tmp"; echo "KEPT original (dur $d1 vs $d2, size $s1 vs $s2)"; fi' _ "$f" "$CQ" "$ENCODE_TIMEOUT")
   case "$res" in
     OK*) read -r _ s1 s2 <<< "$res"; saved=$((saved + s1 - s2)); log "  done: $((s1/1048576)) -> $((s2/1048576)) MB" ;;
     *)   log "  $res"; case "$res" in FAIL*|"") fails=$((fails+1)) ;; esac
