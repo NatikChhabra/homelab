@@ -100,7 +100,10 @@ done
 
 # ---- 2. Bind-mounted app data ----------------------------------------------
 for D in $BIND_DIRS; do
-  [ -d "/c/ServerData/$D" ] || { log "  skip  bind   $D (not present)"; continue; }
+  # A listed folder that vanished is a FAILURE, not a skip (2026-11-10): the age
+  # prune keeps deleting old sets, so a silent skip ends with no copy at all.
+  # Retire a folder by removing it from BIND_DIRS, as was done for Traccar.
+  [ -d "/c/ServerData/$D" ] || { BAD=$((BAD+1)); log "  FAIL  bind   $D (listed in BIND_DIRS but missing)"; continue; }
   A="bind-${D}_${DATESTAMP}.tar.gz"
   # shellcheck disable=SC2086  # BIND_EXCLUDES is a deliberate word list
   tar -czf "$BACKUP_DIR/$A" $BIND_EXCLUDES -C /c/ServerData "$D" 2>/dev/null
